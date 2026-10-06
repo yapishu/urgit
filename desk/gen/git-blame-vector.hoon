@@ -4,6 +4,7 @@
 /+  git-blame
 :-  %say
 |=  *
+:-  %noun
 =/  newest=octs  [8 0xa63.0a61.0a62.0a61]
 =/  parent=octs  [6 0xa63.0a61.0a61]
 =/  root=octs  [4 0xa63.0a61]
