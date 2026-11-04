@@ -1,0 +1,9 @@
+name: fixture-pass
+on: [push]
+jobs:
+  pass:
+    runs-on: ubuntu-latest
+    steps:
+      - name: emit suite output
+        id: emit
+        run: echo "suite=true" >> "$GITHUB_OUTPUT"

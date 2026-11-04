@@ -1,0 +1,15 @@
+name: fixture-labels
+on: [push]
+jobs:
+  big:
+    runs-on: [self-hosted, big-mem]
+    steps:
+      - run: echo big
+  plain:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo plain
+  gpu:
+    runs-on: [self-hosted, gpu]
+    steps:
+      - run: echo gpu

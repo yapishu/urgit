@@ -1,0 +1,8 @@
+name: fixture-unsupported-if
+on: [push]
+jobs:
+  u:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - run: echo "never planned"

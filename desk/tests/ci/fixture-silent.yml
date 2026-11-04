@@ -1,0 +1,12 @@
+name: fixture-silent
+on: [push]
+jobs:
+  silent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: a long step whose runner will be stopped mid-way
+        run: |
+          echo "silent=started" >> "$GITHUB_OUTPUT"
+          sleep 150
+          echo done

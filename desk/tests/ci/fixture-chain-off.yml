@@ -1,0 +1,18 @@
+name: fixture-chain-off
+on: [push]
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.emit.outputs.go }}
+    steps:
+      - name: emit go
+        id: emit
+        run: echo "go=false" >> "$GITHUB_OUTPUT"
+  b:
+    runs-on: ubuntu-latest
+    needs: a
+    if: needs.a.outputs.go == 'true'
+    steps:
+      - name: gated step
+        run: echo "b must not run"

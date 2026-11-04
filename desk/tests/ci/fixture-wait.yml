@@ -1,0 +1,8 @@
+name: fixture-wait
+on: [push]
+jobs:
+  wait:
+    runs-on: ubuntu-latest
+    steps:
+      - name: wait a little
+        run: sleep 45

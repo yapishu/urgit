@@ -1,0 +1,19 @@
+name: fixture-four
+on: [push]
+jobs:
+  one:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 20 && echo one
+  two:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 20 && echo two
+  three:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 20 && echo three
+  four:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 20 && echo four
