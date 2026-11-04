@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { api } from './api.js'
+import { arm, deskText, gaps, type } from './hoonSource.js'
 
 const backend = readFileSync(
   new URL('../../desk/app/urgit.hoon', import.meta.url),
@@ -82,7 +83,8 @@ test('peer pull wire and receive state carry selected refs', () => {
   assert.match(branchOffer, /source-ref=@t/)
   assert.match(branchOffer, /target-ref=@t/)
 
-  const receive = sourceBlock(backend, '+$  peer-receive', '+$  peer-transfer-debug')
+  // the receive state is lib/git-peer-transfer's, which the agent imports
+  const receive = type(deskText('lib/git-peer-transfer.hoon'), 'peer-receive')
   assert.match(receive, /source-ref=@t/)
   assert.match(receive, /target-ref=@t/)
 })
@@ -99,7 +101,7 @@ test('peer pull API validates selected refs and offers both to the origin', () =
   assert.equal([...handler.matchAll(/valid-ref:git-protocol/g)].length, 2)
   assert.match(handler, /~\(get by refs\.u\.found\) u\.source-ref/)
   assert.match(handler, /source branch not found/)
-  assert.match(handler, /\[%offer-branches transfer repository\.u\.peer-origin\.u\.found u\.name u\.source-ref u\.target-ref %.y u\.title\]/)
+  assert.match(gaps(handler), /:\*  %offer-branches  transfer  repository\.u\.peer-origin\.u\.found  u\.name  u\.source-ref  u\.target-ref  %.y  u\.title  ==/)
 })
 
 test('origin validates target and pins selected source and target tips', () => {
@@ -152,7 +154,8 @@ test('local pull creation validates and pins explicit source and target refs', (
   assert.match(create, /~\(get by refs\.u\.found\) u\.source-ref/)
   assert.match(create, /~\(get by refs\.u\.found\) u\.target-ref/)
   assert.match(create, /selected branches have identical tips/)
-  assert.match(create, /\[number our\.bowl name u\.source-ref u\.target-ref u\.title %open u\.incoming u\.base ~\]/)
+  // a new pull request has no comments and, since state-5, no labels
+  assert.match(create, /\[number our\.bowl name u\.source-ref u\.target-ref u\.title %open u\.incoming u\.base ~ ~\]/)
 })
 
 test('merge advances only the recorded target ref and gates Clay only for that ref', () => {
@@ -162,17 +165,19 @@ test('merge advances only the recorded target ref and gates Clay only for that r
     '++  on-arvo',
   )
   assert.match(merge, /~\(get by refs\.u\.found\) target-ref\.pull/)
-  assert.match(merge, /refs \(~\(put by refs\.u\.found\) target-ref\.pull merge-oid\)/)
+  assert.match(gaps(merge), /(?:^|  )refs  \(~\(put by refs\.u\.found\) target-ref\.pull merge-oid\)/)
   assert.match(merge, /=\(target-ref\.pull branch\.u\.binding\.applied\)/)
-  assert.doesNotMatch(merge, /refs \(~\(put by refs\.u\.found\) head\.u\.found merge-oid\)/)
+  assert.doesNotMatch(merge, /refs\s+\(~\(put by refs\.u\.found\) head\.u\.found merge-oid\)/)
 })
 
 test('pull summary and detail JSON expose sourceRef and targetRef', () => {
-  const summary = sourceBlock(backend, '++  repository-json', '++  repositories-json')
+  // the repository and pull JSON is lib/git-json's, which the agent imports
+  const json = deskText('lib/git-json.hoon')
+  const summary = sourceBlock(json, '++  repository-json', '++  repositories-json')
   assert.match(summary, /\['sourceRef' s\+source-ref\.pull\]/)
   assert.match(summary, /\['targetRef' s\+target-ref\.pull\]/)
 
-  const detail = sourceBlock(backend, '++  native-pull-detail-json', '++  valid-lfs-oid')
+  const detail = arm(json, 'native-pull-detail-json')
   assert.match(detail, /'sourceRef' s\+source-ref\.pull/)
   assert.match(detail, /'targetRef' s\+target-ref\.pull/)
 

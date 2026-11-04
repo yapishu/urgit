@@ -1,0 +1,10 @@
+name: fixture-slow
+on: [push]
+jobs:
+  slow:
+    runs-on: ubuntu-latest
+    steps:
+      - name: take a while
+        run: |
+          echo "slow=started" >> "$GITHUB_OUTPUT"
+          sleep 240

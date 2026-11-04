@@ -1,0 +1,10 @@
+name: fixture-fail
+on: [push]
+jobs:
+  fail:
+    runs-on: ubuntu-latest
+    steps:
+      - name: fail on purpose
+        run: |
+          echo "suite=false" >> "$GITHUB_OUTPUT"
+          exit 1

@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { api, waitForPeerBrowse, waitForPeerTransfer } from '../api'
+import { api, ci, waitForPeerBrowse, waitForPeerTransfer } from '../api'
+import CiTab, { useStorageProbe } from './CiTab'
+import { CiPolicySection } from './CiProvenance'
+import RunnersSection from './Runners'
+import BranchPolicyList from './BranchPolicyList'
+import { probeMessage } from '../storageProbe'
+import { ciActions, credentialFormError, parseEnvs, stagedEditNote, stagedPublishNote } from '../ci'
 import { exactBytes, formatBytes } from '../format'
 import { comparisonPatch } from '../patch'
 import FileTree from './FileTree'
 import { useConfirm } from './ConfirmDialog'
 import { HighlightedCode, HighlightedEditor } from './HighlightedCode'
 import { CopyIcon } from './Icons'
+import PullLabels from './PullLabels'
 import Readme from './Readme'
 import MarkdownDocument from './MarkdownDocument'
 import { clearLocalDraft, readLocalDraft, saveLocalDraft, useLocalDraft } from '../useLocalDraft'
@@ -39,7 +46,7 @@ const groupRoleRows = (policy) => Object.entries(policy?.roles || {}).map(([role
 function CopyableHash({ value }) {
   return <span className="tako-chip"><code title={value}>{value}</code><button type="button" className="hash-copy" title="Copy revision hash" aria-label="Copy revision hash" onClick={() => navigator.clipboard.writeText(value)}><CopyIcon /></button></span>
 }
-const validTabs = new Set(['code', 'issues', 'pulls', 'branches', 'tags', 'releases', 'commits', 'webhooks', 'settings'])
+const validTabs = new Set(['code', 'issues', 'pulls', 'branches', 'tags', 'releases', 'commits', 'ci', 'webhooks', 'settings'])
 
 function parseLineRange(value) {
   const match = /^(\d+)(?:-(\d+))?$/.exec(value || '')
@@ -67,6 +74,8 @@ function routeForRepository(repo) {
     branchCreate: name === repo.name && tab === 'branches' && params.get('new') === 'branch',
     tagTarget: name === repo.name && tab === 'tags' ? params.get('target') || '' : '',
     tagKind: name === repo.name && tab === 'tags' ? params.get('targetKind') || '' : '',
+    // a native pull request opened by number (the CI tab links to it)
+    pull: name === repo.name && tab === 'pulls' ? Number(params.get('pull')) || 0 : 0,
   }
 }
 
@@ -81,6 +90,7 @@ function repositoryHash(repo, route) {
   if (route.tab === 'branches' && route.branchCreate) params.set('new', 'branch')
   if (route.tab === 'tags' && route.tagTarget) params.set('target', route.tagTarget)
   if (route.tab === 'tags' && route.tagKind) params.set('targetKind', route.tagKind)
+  if (route.tab === 'pulls' && route.pull) params.set('pull', String(route.pull))
   const query = params.toString()
   return `#/${encodeURIComponent(repo.name)}${query ? `?${query}` : ''}`
 }
@@ -164,6 +174,7 @@ function FileView({ repository, path, branch, githubOrigin, lineStart, lineEnd, 
   const [editing, setEditing] = useState(false)
   const [busy, setBusy] = useState(true)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [revision, setRevision] = useState(branch)
   const [upstream, setUpstream] = useState(null)
   const [upstreamBusy, setUpstreamBusy] = useState(false)
@@ -172,7 +183,7 @@ function FileView({ repository, path, branch, githubOrigin, lineStart, lineEnd, 
   const contentDraftKey = `file:${repository}:${branch}:${path}:content`
   const messageDraftKey = `file:${repository}:${branch}:${path}:message`
 
-  useEffect(() => { setRevision(branch); setHistory(null); setUpstream(null); setView('file') }, [branch, path])
+  useEffect(() => { setRevision(branch); setHistory(null); setUpstream(null); setView('file'); setNotice('') }, [branch, path])
   useEffect(() => { setMessage(readLocalDraft(messageDraftKey, `Edit ${path}`)); setEditing(false) }, [messageDraftKey, path])
   useEffect(() => { setBlame(null) }, [revision, path])
 
@@ -198,9 +209,14 @@ function FileView({ repository, path, branch, githubOrigin, lineStart, lineEnd, 
   async function save() {
     setBusy(true)
     setError('')
+    setNotice('')
     try {
-      await api.saveFile(repository, path, encodeBase64(text), message.trim(), branch)
-      setOriginal(text)
+      const answer = await api.saveFile(repository, path, encodeBase64(text), message.trim(), branch)
+      // a CI-protected branch stages the edit and keeps its tip (Q4)
+      const staged = stagedEditNote(answer, branch, 'This edit')
+      if (staged) setText(original)
+      else setOriginal(text)
+      setNotice(staged)
       clearLocalDraft(contentDraftKey); clearLocalDraft(messageDraftKey)
       setEditing(false)
       await onSaved()
@@ -215,8 +231,12 @@ function FileView({ repository, path, branch, githubOrigin, lineStart, lineEnd, 
     if (!await confirmAction({ title: 'Delete file?', message: path, detail: 'This creates a commit that removes the file from the selected branch.', confirmLabel: 'Delete file' })) return
     setBusy(true)
     setError('')
+    setNotice('')
     try {
-      await api.deleteFile(repository, path, `Delete ${path}`, branch)
+      const answer = await api.deleteFile(repository, path, `Delete ${path}`, branch)
+      // a CI-protected branch stages the deletion; the file is still there (Q4)
+      const staged = stagedEditNote(answer, branch, 'This deletion')
+      if (staged) { setNotice(staged); setBusy(false); await onSaved(); return }
       await onDeleted()
     } catch (cause) {
       setError(cause.message)
@@ -270,6 +290,7 @@ function FileView({ repository, path, branch, githubOrigin, lineStart, lineEnd, 
         </div>
       </div>
       {error && <div className="inline-error">{error}</div>}
+      {notice && <div className="field-note">{notice}</div>}
       {view === 'history' ? (
         !history ? <div className="empty">Loading file history…</div> : !history.commits?.length ? <div className="empty">No changes found for this file.</div> : <Commits data={history} loading={false} onSelect={(commit) => { if (commit.present) { setRevision(commit.oid); setView('file') } }} />
       ) : view === 'blame' ? (
@@ -302,18 +323,23 @@ function NewFile({ repository, branch, onCancel, onCreated }) {
   const [message, setMessage, clearMessage] = useLocalDraft(`new-file:${repository}:${branch}:message`, 'Create file')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const normalized = `/${path.trim().replace(/^\/+/, '')}`
   async function create() {
-    setBusy(true); setError('')
+    setBusy(true); setError(''); setNotice('')
     try {
-      await api.saveFile(repository, normalized, encodeBase64(content), message.trim(), branch)
+      const answer = await api.saveFile(repository, normalized, encodeBase64(content), message.trim(), branch)
       clearPath(); clearContent(); clearMessage()
+      // a CI-protected branch stages the new file; it is not there yet (Q4)
+      const staged = stagedEditNote(answer, branch, 'This new file')
+      if (staged) { setNotice(staged); setBusy(false); return }
       await onCreated(normalized)
     } catch (cause) { setError(cause.message); setBusy(false) }
   }
   return <div className="new-file-panel">
     <div className="file-toolbar"><button className="text-button file-back" onClick={onCancel}>← Files</button><strong>New file</strong></div>
     {error && <div className="inline-error">{error}</div>}
+    {notice && <div className="field-note">{notice}</div>}
     <label><span>Path</span><input autoFocus value={path} onChange={(event) => setPath(event.target.value)} placeholder="lib/example.hoon" /></label>
     <HighlightedEditor value={content} path={normalized} onChange={(event) => setContent(event.target.value)} />
     <div className="editor-footer"><input value={message} onChange={(event) => setMessage(event.target.value)} aria-label="Commit message" /><button className="button" onClick={onCancel}>Cancel</button><button className="button primary" disabled={busy || !path.trim() || !message.trim()} onClick={create}>{busy ? 'Committing…' : 'Create file'}</button></div>
@@ -623,7 +649,7 @@ function Webhooks({ repo, onMutate }) {
   </div>
 }
 
-function PullRequests({ repo, onMutate, onOpenOrigin }) {
+function PullRequests({ repo, onMutate, onOpenOrigin, initialPull = 0, onPullConsumed }) {
   const [busy, setBusy] = useState(0)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('open')
@@ -759,6 +785,16 @@ function PullRequests({ repo, onMutate, onOpenOrigin }) {
     }
   }
 
+  // a pull request named by the route (a CI run's link) opens once, by its
+  // number among the native pull requests, and the route then forgets it
+  useEffect(() => {
+    if (!initialPull) return
+    const found = pulls.find((pull) => Number(pull.number) === Number(initialPull))
+    if (found) inspect({ ...found, native: true })
+    else setError(`Pull request #${initialPull} is not a native pull request of this repository.`)
+    onPullConsumed?.()
+  }, [initialPull])
+
   async function inspect(pull) {
     setSelected(pull); setDiff(null); setGithubDetail(null); setGithubDiff(null); setError(''); setCommentTarget(null)
     try {
@@ -800,6 +836,7 @@ function PullRequests({ repo, onMutate, onOpenOrigin }) {
     <button className="text-button file-back" onClick={() => { setSelected(null); setDiff(null); setCommentTarget(null) }}>← Pull requests</button>
     <header className="pull-detail-header"><div><h2>#{selected.number} {selected.title}</h2><p><span className={`status ${selected.state === 'open' ? 'good' : ''}`}>{selected.state}</span> <code>{selected.sourceShip}/{selected.sourceRepository}</code> proposes <code>{pullRefLabel(selected.sourceRef, selected.head)}</code> into <code>{pullRefLabel(selected.targetRef, selected.base)}</code></p></div><div className="pr-actions">{selected.state === 'closed' && <button className="button" disabled={busy} onClick={() => setPullState(selected.number, 'open')}>{busy === selected.number ? 'Reopening…' : 'Reopen'}</button>}{selected.state === 'open' && <><button className="button" disabled={busy} onClick={() => setPullState(selected.number, 'closed')}>{busy === selected.number ? 'Closing…' : 'Close'}</button><button className="button primary" disabled={busy} onClick={() => merge(selected.number)}>{busy === selected.number ? 'Validating…' : 'Merge pull request'}</button></>}</div></header>
     {error && <div className="inline-error">{error}</div>}
+    <PullLabels labels={diff?.labels || selected.labels || []} editable={Boolean(diff?.labelsEditable)} onSave={(labels) => api.setPullLabels(repo.name, selected.number, labels)} onSaved={async () => { setDiff(await api.pull(repo.name, selected.number)); await onMutate?.() }} />
     {!diff ? <div className="empty">Loading diff…</div> : <>
       <DiffView diff={diff} onCommentTarget={setCommentTarget} />
       <section className="review-discussion">
@@ -828,7 +865,7 @@ function PullRequests({ repo, onMutate, onOpenOrigin }) {
     {!entries.length ? <div className="empty compact">{repo.peerOrigin ? 'No pull requests opened from this repository yet.' : 'No pull requests.'}</div> : !visible.length ? <div className="empty compact">No pull requests match this filter.</div> : <div className="pull-list">
     {error && <div className="inline-error">{error}</div>}
     {visible.map((pull) => pull.native ? <article className="pull-row clickable" key={`native-${pull.number}`} onClick={() => inspect(pull)}>
-      <div><span className={`status ${pull.state === 'open' ? 'good' : ''}`}>{pull.state}</span><h3>#{pull.number} {pull.title}</h3><p><code>{pull.sourceShip}/{pull.sourceRepository}</code> proposes <code>{pullRefLabel(pull.sourceRef, pull.head)}</code> into <code>{pullRefLabel(pull.targetRef, pull.base)}</code></p></div>
+      <div><span className={`status ${pull.state === 'open' ? 'good' : ''}`}>{pull.state}</span><h3>#{pull.number} {pull.title}</h3><p><code>{pull.sourceShip}/{pull.sourceRepository}</code> proposes <code>{pullRefLabel(pull.sourceRef, pull.head)}</code> into <code>{pullRefLabel(pull.targetRef, pull.base)}</code></p>{(pull.labels || []).length > 0 && <div className="issue-labels inline" aria-label="Labels">{pull.labels.map((label) => <span key={label}>{label}</span>)}</div>}</div>
       {pull.state === 'open' && <button className="button primary" disabled={busy} onClick={(event) => { event.stopPropagation(); merge(pull.number) }}>{busy === pull.number ? 'Validating…' : 'Merge'}</button>}
     </article> : <button className="pull-row forge-link clickable row-button" key={`github-${pull.number}`} onClick={() => inspect(pull)}>
       <div><span className={`status ${pull.state === 'open' ? 'good' : ''}`}>{pull.draft ? 'draft' : pull.state}</span><h3>#{pull.number} {pull.title}</h3><p>opened by <strong>{pull.author}</strong> on GitHub</p></div><span className="external-arrow">↗</span>
@@ -1038,6 +1075,8 @@ function Settings({ repo, onMutate }) {
   const [desk, setDesk] = useState(repo.binding?.desk || '')
   const [branch, setBranch] = useState(repo.binding?.branch || repo.head || 'refs/heads/main')
   const [message, setMessage] = useState('Publish Clay desk')
+  // a publication to a CI-protected branch is staged, not committed (Q5)
+  const [publishNote, setPublishNote] = useState('')
   const [token, setToken] = useState('')
   const [writer, setWriter] = useState('')
   const [reader, setReader] = useState('')
@@ -1048,6 +1087,59 @@ function Settings({ repo, onMutate }) {
   const [groupsError, setGroupsError] = useState('')
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
+  // the CI policy (which branches require CI, what untrusted revisions
+  // get) and the credential names come from %urgit-ci's own routes
+  const [ciPolicy, setCiPolicy] = useState(null)
+  const [ciError, setCiError] = useState('')
+  const [credentials, setCredentials] = useState([])
+  // CI-RECOVERY-1: the credential names a restore brought back with no
+  // value, which need re-entry
+  const [reentry, setReentry] = useState([])
+  const [credForm, setCredForm] = useState({ name: '', value: '', scope: 'job', envs: '', multiline: false })
+  const [credError, setCredError] = useState('')
+  const loadCi = useCallback(async () => {
+    try {
+      const [policy, creds] = await Promise.all([ci.policy(repo.name), ci.credentials(repo.name)])
+      setCiPolicy(policy); setCredentials(creds.credentials || []); setReentry(creds.needsReentry || []); setCiError('')
+    } catch (cause) { setCiError(cause.message) }
+  }, [repo.name])
+  useEffect(() => { loadCi() }, [loadCi])
+  async function ciAct(label, body) {
+    setBusy(label); setError(''); setCredError('')
+    try { await ci.action(body); await loadCi(); await onMutate() } catch (cause) { setError(cause.message) } finally { setBusy('') }
+  }
+  // the CI required toggle (P3 D5 b, D7): a refusal (no object store, no
+  // tip, a desk-linked repository) is shown at the toggle itself; turning
+  // it on runs the storage probe, and a red probe is a warning under the
+  // toggle, not a refusal — the daemon may still reach the store
+  const storageProbe = useStorageProbe()
+  const [toggleError, setToggleError] = useState({})
+  const [toggleWarning, setToggleWarning] = useState({})
+  async function ciRequiredToggle(ref, on) {
+    setBusy(`ci-${ref}`); setToggleError((e) => ({ ...e, [ref]: '' })); setToggleWarning((w) => ({ ...w, [ref]: '' }))
+    try {
+      await ci.action(ciActions.setCiProtected(repo.name, ref, on))
+      await loadCi(); await onMutate()
+      if (on) {
+        const state = await storageProbe.run()
+        if (state === 'unreachable' || state === 'cors') setToggleWarning((w) => ({ ...w, [ref]: probeMessage(state, storageProbe.host) }))
+      }
+    } catch (cause) { setToggleError((e) => ({ ...e, [ref]: cause.message })) } finally { setBusy('') }
+  }
+  async function addCredential(event) {
+    event.preventDefault()
+    const problem = credentialFormError(credForm)
+    if (problem) { setCredError(problem); return }
+    setBusy('credential'); setError(''); setCredError('')
+    try {
+      await ci.action(ciActions.setCredential(repo.name, credForm.name.trim(), credForm.value, credForm.scope, parseEnvs(credForm.envs)))
+      await loadCi()
+    } catch (cause) { setCredError(cause.message) } finally {
+      // the value never outlives the submit: the field is cleared whatever happened
+      setCredForm((form) => ({ ...form, value: '' }))
+      setBusy('')
+    }
+  }
   const [syncResult, setSyncResult] = useState('')
   const [githubTitle, setGithubTitle] = useState('')
   const [githubHead, setGithubHead] = useState('')
@@ -1262,8 +1354,9 @@ function Settings({ repo, onMutate }) {
             <label><span>Commit message</span><input value={message} onChange={(e) => setMessage(e.target.value)} /></label>
             <div className="bridge-actions">
               <button className="button" disabled={busy || bridgeStatus?.contentsMatch || !bridgeStatus?.canApply} onClick={() => act('apply-clay', () => api.applyToClay(repo.name))}>{busy === 'apply-clay' ? 'Applying…' : 'Apply branch to desk'}</button>
-              <button className="button primary" disabled={busy || !message.trim() || bridgeStatus?.contentsMatch} onClick={() => act('publish', () => api.publish(repo.name, message.trim()))}>{busy === 'publish' ? 'Publishing…' : 'Publish desk to branch'}</button>
+              <button className="button primary" disabled={busy || !message.trim() || bridgeStatus?.contentsMatch} onClick={() => act('publish', async () => { setPublishNote(''); setPublishNote(stagedPublishNote(await api.publish(repo.name, message.trim()))) })}>{busy === 'publish' ? 'Publishing…' : 'Publish desk to branch'}</button>
             </div>
+            {publishNote && <div className="field-note">{publishNote}</div>}
             <div className="form-actions split bridge-footer">
               <small className="quiet">Clay rejects invalid desk updates and returns the build trace.</small>
               <button className="button ghost danger-text" disabled={busy} onClick={() => act('unbind', () => api.unbind(repo.name))}>Unbind</button>
@@ -1331,16 +1424,69 @@ function Settings({ repo, onMutate }) {
           </div>
           <div className="form-actions split"><button className="text-button" disabled={!nextRole} onClick={() => setGroupRoles((rows) => [...rows, { role: nextRole.id, capability: 'read' }])}>Add role</button><div>{repo.groupPolicy && <button className="text-button danger-text" onClick={() => act('clear-group-policy', () => api.setGroupPolicy(repo.name, null))}>Clear</button>} <button className="button" disabled={busy || !canSaveGroupPolicy} onClick={saveGroupPolicy}>{busy === 'group-policy' ? 'Saving…' : 'Save'}</button></div></div>
         </div>
+        <RunnersSection />
+        <BranchPolicyList
+          part="protected-branches"
+          title="Protected branches"
+          description="Protected branches accept fast-forward updates, but reject force-pushes and deletion."
+          chosen={repo.protectedRefs || []}
+          refs={repo.refs || []}
+          busy={busy !== ''}
+          rowNote="Fast-forward updates only."
+          emptyText="No protected branches. Force-push and deletion are allowed on every branch."
+          confirm={confirmAction}
+          removeConfirm={(label) => ({ title: 'Remove protection?', message: label, detail: 'Force-pushes and deletion of this branch will be allowed again.' })}
+          onAdd={(ref) => act(`protected-${ref}`, () => api.setProtected(repo.name, ref, true))}
+          onRemove={(ref) => act(`protected-${ref}`, () => api.setProtected(repo.name, ref, false))}
+        />
+        <BranchPolicyList
+          part="ci-required-branches"
+          title="CI-required branches"
+          description="Pushes and merges to these branches are staged as candidates and land only when the checks pass."
+          chosen={ciPolicy?.ciProtected || []}
+          refs={repo.refs || []}
+          busy={busy !== ''}
+          disabled={!ciPolicy}
+          rowNote="Lands only when the checks pass."
+          rowMessages={(ref) => [
+            toggleError[ref] && { text: toggleError[ref], className: 'field-error' },
+            toggleWarning[ref] && { text: toggleWarning[ref], className: 'field-error ci-toggle-warning' },
+          ].filter(Boolean)}
+          emptyText="No branch requires CI. Pushes land without checks."
+          confirm={confirmAction}
+          removeConfirm={(label) => ({ title: 'Stop requiring CI?', message: label, detail: 'Pushes and merges to this branch will land at once, without checks.' })}
+          onAdd={(ref) => ciRequiredToggle(ref, true)}
+          onRemove={(ref) => ciRequiredToggle(ref, false)}
+        />
+        {ciError && <small className="field-error">CI settings unavailable: {ciError}</small>}
+        {Object.entries(toggleError).filter(([ref, text]) => text && !(ciPolicy?.ciProtected || []).includes(ref)).map(([ref, text]) => <small key={ref} className="field-error" data-part="ci-add-error">Could not require CI on {ref.replace('refs/heads/', '')}: {text}</small>)}
         <div className="subsection">
-          <div className="section-title"><div><h3>Protected branches</h3><p>Protected branches accept fast-forward updates, but reject force-pushes and deletion.</p></div></div>
-          <div className="branch-policy-list">
-            {(repo.refs || []).filter((entry) => entry.name.startsWith('refs/heads/')).map((entry) => {
-              const protectedBranch = (repo.protectedRefs || []).includes(entry.name)
-              return <label className="check-row compact" key={entry.name}><input type="checkbox" checked={protectedBranch} onChange={(event) => act(`protected-${entry.name}`, () => api.setProtected(repo.name, entry.name, event.target.checked))} /><span><strong>{entry.name.replace('refs/heads/', '')}</strong><small>{protectedBranch ? 'Fast-forward updates only.' : 'Force-push and deletion allowed.'}</small></span></label>
-            })}
-            {!(repo.refs || []).some((entry) => entry.name.startsWith('refs/heads/')) && <small className="quiet">No branches yet.</small>}
+          <div className="section-title"><div><h3>Untrusted revisions</h3><p>A revision from a ship that cannot write this repository, such as a fork pull request, is untrusted.</p></div></div>
+          <div className="ci-radio">
+            {[['approval', 'Wait for approval', 'It runs nothing until a writer approves it on the CI tab.'], ['restricted', 'Run restricted checks', 'It runs at once with no credentials and can never land; approval still runs it trusted.']].map(([value, title, detail]) => (
+              <label className="check-row compact" key={value}><input type="radio" name={`untrusted-${repo.name}`} value={value} checked={(ciPolicy?.untrusted || repo.ciUntrustedPolicy || 'approval') === value} disabled={busy !== '' || !ciPolicy} onChange={() => ciAct('untrusted', ciActions.setUntrustedPolicy(repo.name, value))} /><span><strong>{title}</strong><small>{detail}</small></span></label>
+            ))}
           </div>
         </div>
+        <div className="subsection">
+          <div className="section-title"><div><h3>Credentials</h3><p>Released to trusted jobs only, as secrets. A job-scoped credential reaches every trusted job; an env-scoped one only jobs whose <code>environment</code> is listed. Values are never shown again.</p></div></div>
+          <div className="writer-list">
+            {credentials.map((cred) => <div key={cred.name}><code>{cred.name}</code><small className="quiet">{cred.scope}{cred.scope === 'env' ? `: ${(cred.envs || []).join(', ')}` : ''}</small><button className="text-button danger-text" disabled={busy !== ''} onClick={() => ciAct(`cred-${cred.name}`, ciActions.deleteCredential(repo.name, cred.name))}>Delete</button></div>)}
+            {reentry.map((cred) => <div key={`reentry-${cred.name}`} data-part="credential-reentry"><code>{cred.name}</code><small className="field-error">needs re-entry: a restore brought back its name with no value</small></div>)}
+            {!credentials.length && !reentry.length && <small className="quiet">No credentials stored.</small>}
+          </div>
+          <form className="ci-credential-form" onSubmit={addCredential} autoComplete="off">
+            <div className="three-fields">
+              <label><span>Name</span><input value={credForm.name} onChange={(e) => setCredForm({ ...credForm, name: e.target.value })} placeholder="NPM_TOKEN" /></label>
+              <label><span>Value</span>{credForm.multiline ? <textarea rows={4} className="ci-secret" value={credForm.value} autoComplete="off" spellCheck={false} onChange={(e) => setCredForm({ ...credForm, value: e.target.value })} /> : <input type="password" value={credForm.value} autoComplete="new-password" onChange={(e) => setCredForm({ ...credForm, value: e.target.value })} />}<small className="quiet"><label className="check-row compact"><input type="checkbox" checked={credForm.multiline} onChange={(e) => setCredForm({ ...credForm, multiline: e.target.checked })} /><span>Multi-line value (a PEM key pastes as is; every line is masked in logs)</span></label></small></label>
+              <label><span>Scope</span><select value={credForm.scope} onChange={(e) => setCredForm({ ...credForm, scope: e.target.value })}><option value="job">Every trusted job</option><option value="env">Named environments</option></select></label>
+            </div>
+            {credForm.scope === 'env' && <label><span>Environments</span><input value={credForm.envs} onChange={(e) => setCredForm({ ...credForm, envs: e.target.value })} placeholder="staging, production" /></label>}
+            {credError && <small className="field-error">{credError}</small>}
+            <div className="form-actions"><button className="button" type="submit" disabled={busy !== ''}>{busy === 'credential' ? 'Storing…' : 'Add credential'}</button></div>
+          </form>
+        </div>
+        {ciPolicy && <CiPolicySection repo={repo} policy={ciPolicy} onChanged={async () => { await loadCi(); await onMutate() }} />}
       </section>
       <section className="panel">
         <div className="section-title"><div><h2>Git LFS storage</h2><p>Locks protect shared binary paths. Cleanup removes verified payloads that no advertised ref can reach.</p></div><span className="status">{repo.lfsLockCount || 0} locks</span></div>
@@ -1366,6 +1512,7 @@ export default function RepositoryView({ repo, onRefresh, onOpenOrigin, publicMo
   const [branchCreate, setBranchCreate] = useState(initialRoute.branchCreate)
   const [tagTarget, setTagTarget] = useState(initialRoute.tagTarget)
   const [tagKind, setTagKind] = useState(initialRoute.tagKind)
+  const [pull, setPull] = useState(initialRoute.pull)
   const [searchQuery, setSearchQuery] = useState(initialRoute.searchQuery)
   const [searchDraft, setSearchDraft] = useState(initialRoute.searchQuery)
   const [searchData, setSearchData] = useState(null)
@@ -1393,18 +1540,20 @@ export default function RepositoryView({ repo, onRefresh, onOpenOrigin, publicMo
     setBranchCreate(route.branchCreate)
     setTagTarget(route.tagTarget)
     setTagKind(route.tagKind)
+    setPull(route.pull || 0)
     setSearchQuery(route.searchQuery)
     setSearchDraft(route.searchQuery)
   }
 
   function navigate(changes, replace = false) {
-    const route = { tab, branch, filePath, lineStart, lineEnd, commitOid, branchCreate, tagTarget, tagKind, searchQuery, ...changes }
+    const route = { tab, branch, filePath, lineStart, lineEnd, commitOid, branchCreate, tagTarget, tagKind, pull, searchQuery, ...changes }
     if (Object.hasOwn(changes, 'filePath') && changes.filePath !== filePath && !Object.hasOwn(changes, 'lineStart')) { route.lineStart = null; route.lineEnd = null }
     if (route.tab !== 'code') { route.filePath = ''; route.lineStart = null; route.lineEnd = null; route.searchQuery = '' }
     if (!route.filePath) { route.lineStart = null; route.lineEnd = null }
     if (route.tab !== 'commits') route.commitOid = ''
     if (route.tab !== 'branches') route.branchCreate = false
     if (route.tab !== 'tags') { route.tagTarget = ''; route.tagKind = '' }
+    if (route.tab !== 'pulls') route.pull = 0
     history[replace ? 'replaceState' : 'pushState']({}, '', repositoryHash(repo, route))
     applyRoute(route)
   }
@@ -1502,7 +1651,7 @@ export default function RepositoryView({ repo, onRefresh, onOpenOrigin, publicMo
       </div>
       {!publicMode && (repo.upstreamUpdates || []).length > 0 && <button className="upstream-banner" onClick={() => navigate({ tab: 'webhooks', filePath: '', commitOid: '' })}><span className="activity-dot active" /><span><strong>Upstream has new commits</strong><small>{repo.upstreamUpdates[0].source} pushed {repo.upstreamUpdates[0].ref}</small></span><b>Review and pull →</b></button>}
       <nav className="tabs">
-        {(publicMode ? [['code', 'Code'], ['issues', 'Issues', repo.nativeIssues?.length], ['branches', 'Branches', (repo.refs || []).filter((ref) => ref.name.startsWith('refs/heads/')).length], ['tags', 'Tags', repo.tagCount], ['releases', 'Releases', repo.releases?.length], ['commits', clayHistory ? 'Revisions' : 'Commits']] : [['code', 'Code'], ['issues', 'Issues', (repo.nativeIssues?.length || 0) + (repo.githubIssues?.length || 0)], ['pulls', 'Pull requests', (repo.pullRequests?.length || 0) + (repo.githubPulls?.length || 0)], ['branches', 'Branches', (repo.refs || []).filter((ref) => ref.name.startsWith('refs/heads/')).length], ['tags', 'Tags', repo.tagCount], ['releases', 'Releases', repo.releases?.length], ['commits', clayHistory ? 'Revisions' : 'Commits'], ['webhooks', 'Webhooks', (repo.upstreamUpdates?.length || 0)], ['settings', 'Settings']]).map(([name, label, count]) => <button key={name} className={tab === name ? 'active' : ''} onClick={() => navigate({ tab: name, filePath: '', commitOid: '' })}><span>{label}</span>{count > 0 && <b className="tab-count">{count}</b>}</button>)}
+        {(publicMode ? [['code', 'Code'], ['issues', 'Issues', repo.nativeIssues?.length], ['branches', 'Branches', (repo.refs || []).filter((ref) => ref.name.startsWith('refs/heads/')).length], ['tags', 'Tags', repo.tagCount], ['releases', 'Releases', repo.releases?.length], ['commits', clayHistory ? 'Revisions' : 'Commits']] : [['code', 'Code'], ['issues', 'Issues', (repo.nativeIssues?.length || 0) + (repo.githubIssues?.length || 0)], ['pulls', 'Pull requests', (repo.pullRequests?.length || 0) + (repo.githubPulls?.length || 0)], ['branches', 'Branches', (repo.refs || []).filter((ref) => ref.name.startsWith('refs/heads/')).length], ['tags', 'Tags', repo.tagCount], ['releases', 'Releases', repo.releases?.length], ['commits', clayHistory ? 'Revisions' : 'Commits'], ['ci', 'CI'], ['webhooks', 'Webhooks', (repo.upstreamUpdates?.length || 0)], ['settings', 'Settings']]).map(([name, label, count]) => <button key={name} className={tab === name ? 'active' : ''} onClick={() => navigate({ tab: name, filePath: '', commitOid: '' })}><span>{label}</span>{count > 0 && <b className="tab-count">{count}</b>}</button>)}
       </nav>
       <section className="repo-body">
         {tab === 'code' && <div className="branch-context"><select value={branch} onChange={(event) => browseBranch(event.target.value)}>{(repo.refs || []).filter((ref) => ref.name.startsWith('refs/heads/')).map((ref) => <option key={ref.name} value={ref.name}>{ref.name.replace('refs/heads/', '')}</option>)}</select><span>{detail?.files?.files?.length || 0} files</span>{branch !== repo.head && <button className="text-button" onClick={() => browseBranch(repo.head)}>Default branch</button>}{!publicMode && !filePath && !creatingFile && <><button className="button" onClick={() => navigate({ tab: 'branches', filePath: '', branchCreate: true })}>New branch</button><button className="button new-file-button" onClick={() => { setCreatingFile(true); navigate({ searchQuery: '' }, true) }}>New file</button></>}<form className="code-search" onSubmit={(event) => { event.preventDefault(); const query = searchDraft.trim(); if (!query || query.length >= 2) { setCreatingFile(false); navigate({ filePath: '', lineStart: null, lineEnd: null, searchQuery: query }) } }}><input value={searchDraft} maxLength={200} onChange={(event) => setSearchDraft(event.target.value)} placeholder="Search code" aria-label="Search repository code" />{searchQuery && <button type="button" className="text-button" onClick={() => navigate({ searchQuery: '', filePath: '' })}>Clear</button>}</form></div>}
@@ -1517,7 +1666,8 @@ export default function RepositoryView({ repo, onRefresh, onOpenOrigin, publicMo
         {tab === 'tags' && <Tags repo={repo} publicMode={publicMode} onMutate={mutate} initialTarget={tagTarget} initialKind={tagKind} onTargetConsumed={() => navigate({ tagTarget: '', tagKind: '' }, true)} />}
         {tab === 'releases' && <Releases repo={repo} publicMode={publicMode} onMutate={mutate} client={client} />}
         {tab === 'commits' && (commitOid ? commitLoading || !commitDetail ? <div className="empty">Loading commit…</div> : <CommitDetail data={commitDetail} onBack={() => navigate({ commitOid: '' })} onOpenGit={(oid) => navigate({ commitOid: oid })} onCreateTag={!publicMode ? createTagFrom : null} /> : <Commits data={detail} loading={loading} loadingMore={historyLoadingMore} onLoadMore={loadMoreHistory} onSelect={openCommit} onCreateTag={!publicMode ? createTagFrom : null} />)}
-        {tab === 'pulls' && <PullRequests repo={repo} onMutate={mutate} onOpenOrigin={onOpenOrigin} />}
+        {tab === 'pulls' && <PullRequests repo={repo} onMutate={mutate} onOpenOrigin={onOpenOrigin} initialPull={pull} onPullConsumed={() => navigate({ pull: 0 }, true)} />}
+        {tab === 'ci' && <CiTab repo={repo} onMutate={mutate} onOpenPull={(number) => navigate({ tab: 'pulls', pull: number, filePath: '', commitOid: '' })} onSettings={() => navigate({ tab: 'settings', filePath: '', commitOid: '' })} />}
         {tab === 'webhooks' && <Webhooks repo={repo} onMutate={mutate} />}
         {tab === 'settings' && <Settings repo={repo} onMutate={mutate} />}
       </section>

@@ -1,0 +1,10 @@
+name: fixture-matrix
+on: [push]
+jobs:
+  m:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        n: [1, 2]
+    steps:
+      - run: echo "matrix ${{ matrix.n }}"

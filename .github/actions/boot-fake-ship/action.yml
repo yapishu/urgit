@@ -1,0 +1,172 @@
+name: boot a fake ship with the desk
+description: >
+  Boot a fresh fake ship from the pinned pill under tmux, create and
+  mount a desk, sync this repository's desk/ into it (plus the one
+  import build.zig fetches), and commit it — so the desk's generators
+  can run in the dojo.
+
+# Copied from ERPit's .github/actions/boot-fake-ship (the boot step is
+# theirs, unchanged in substance) and adapted for urgit: ERPit's second
+# step runs its bin/sync.sh and installs its agents; this one syncs
+# desk/ with rsync, fetches lib/skeleton.hoon the way build.zig does
+# (its one dependency import), and commits through the same conn.c
+# primitive (click, a %kiln-commit poke) with ERPit's kelvin guard in
+# front of it. The agents are NOT installed: the vector generators are
+# library tests that build against the committed desk, and |install
+# would only add a minute and four agents nobody asks anything of.
+#
+# The pier lives outside the checkout, per ERPit's rule: a pier inside
+# the tree would put a second copy of desk/ under anything that walks it.
+
+inputs:
+  ship:
+    description: the fake ship name, without the sig (zod, nec, wes)
+    required: true
+  pier:
+    description: absolute path to the pier directory to create
+    required: true
+  session:
+    description: the tmux session name to run the ship under
+    required: true
+  pill:
+    description: absolute path to the pill to boot from
+    required: true
+  desk:
+    description: the desk to create and commit the tree into
+    required: false
+    default: urgit
+  source:
+    description: the directory in the checkout to sync into the desk
+    required: false
+    default: desk
+  skeleton-url:
+    description: >
+      the raw URL of lib/skeleton.hoon at the commit build.zig pins
+      (its base-dev import), copied into the desk as build.zig would
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The binary goes in ABSOLUTELY: tmux runs its own default shell,
+    # which does not carry this job's PATH additions (ERPit hit this for
+    # real). 200 columns so the dojo seldom pretty-prints a value over
+    # lines; the vector step joins what it still wraps.
+    - name: boot a fresh fake ~${{ inputs.ship }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        URBIT_BIN="$(command -v urbit)"
+        pier='${{ inputs.pier }}'
+        session='${{ inputs.session }}'
+        echo "booting $URBIT_BIN -F ${{ inputs.ship }} -B ${{ inputs.pill }} -c $pier"
+        # Bare, never piped: vere's terminal wants the pty tmux gives it,
+        # and a pipe on stdout would take the dojo away. The pane log
+        # comes from pipe-pane instead.
+        tmux new-session -d -s "$session" -x 200 -y 50 \
+          "$URBIT_BIN -F ${{ inputs.ship }} -B ${{ inputs.pill }} -c $pier"
+        tmux pipe-pane -t "$session" "cat >> $RUNNER_TEMP/boot-$session.log"
+        booted=0
+        for i in $(seq 1 240); do
+          if tmux capture-pane -t "$session" -p 2>/dev/null \
+             | grep -q '~${{ inputs.ship }}:dojo>'; then
+            booted=1
+            echo "dojo prompt after ~$((i * 5))s"
+            break
+          fi
+          if ! tmux has-session -t "$session" 2>/dev/null; then
+            echo "boot: the tmux session died before the dojo came up" >&2
+            tail -50 "$RUNNER_TEMP/boot-$session.log" || true
+            exit 1
+          fi
+          sleep 5
+          if [ $((i % 12)) -eq 0 ]; then
+            echo "--- still booting ($((i * 5))s) ---"
+            tmux capture-pane -t "$session" -p | grep -v '^\s*$' | tail -3 || true
+          fi
+        done
+        [ "$booted" = 1 ] || {
+          echo "boot: no ~${{ inputs.ship }}:dojo> prompt within 20 minutes" >&2
+          tmux capture-pane -t "$session" -p -S -200 || true
+          exit 1
+        }
+        [ -S "$pier/.urb/conn.sock" ] || {
+          echo "boot: no conn.sock under $pier" >&2
+          exit 1
+        }
+        echo "conn.sock is live"
+
+    # |new-desk and |mount are generators, the one thing send-keys is for.
+    # Everything after rides conn.c: the kelvin guard, the commit, and
+    # the wait for it (a desk pinned to a kelvin the pier does not have is
+    # wedged SILENTLY — clay queues the commit and the poke still acks —
+    # so the guard fails loud first, as ERPit's bin/sync.sh does).
+    - name: create the desk, sync the tree into it, commit it
+      shell: bash
+      run: |
+        set -euo pipefail
+        pier='${{ inputs.pier }}'
+        session='${{ inputs.session }}'
+        desk='${{ inputs.desk }}'
+        src='${{ inputs.source }}'
+        tmux send-keys -t "$session" -- "|new-desk %$desk" Enter
+        sleep 10
+        tmux send-keys -t "$session" -- "|mount %$desk" Enter
+        mounted=0
+        for i in $(seq 1 60); do
+          [ -d "$pier/$desk" ] && { mounted=1; echo "the desk mounted after ~$((i * 2))s"; break; }
+          sleep 2
+        done
+        [ "$mounted" = 1 ] || {
+          echo "desk: $pier/$desk never appeared — |new-desk or |mount failed" >&2
+          tmux capture-pane -t "$session" -p | tail -20 || true
+          exit 1
+        }
+        # the kelvin guard: the pier's zuse must be one the desk pins
+        thread="$RUNNER_TEMP/get-kelvin.hoon"
+        printf '=/  m  (strand ,vase)\n(pure:m !>(zuse))\n' > "$thread"
+        have="$(click -k -i "$thread" "$pier" 2>/dev/null | tail -1 | grep -o '[0-9]\+ *\]*$' | grep -o '[0-9]\+' || true)"
+        [ -n "$have" ] || { echo "kelvin guard: could not read the pier's zuse kelvin" >&2; exit 1; }
+        if ! grep -qE "\[%zuse $have\]" "$src/sys.kelvin"; then
+          echo "kelvin mismatch: the pier runs zuse $have but $src/sys.kelvin pins $(tr '\n' ' ' < "$src/sys.kelvin")— clay would queue this commit silently; boot from a matching pill" >&2
+          exit 1
+        fi
+        echo "kelvin guard: the pier runs zuse $have, which the desk pins"
+        rsync -a --delete "$src/" "$pier/$desk/"
+        # build.zig's one dependency import, at the commit it pins
+        mkdir -p "$pier/$desk/lib"
+        curl -fsSL --retry 3 -o "$pier/$desk/lib/skeleton.hoon" '${{ inputs.skeleton-url }}'
+        echo "synced $src/ into $pier/$desk/ ($(find "$pier/$desk" -type f | wc -l) files, lib/skeleton.hoon fetched)"
+        thread="$RUNNER_TEMP/commit.hoon"
+        cat > "$thread" <<HOON
+        =/  m  (strand ,vase)
+        ;<  our=@p  bind:m  get-our
+        ;<  ~  bind:m  (poke [our %hood] %kiln-commit !>([%$desk |]))
+        (pure:m !>(%committed))
+        HOON
+        out="$(click -k -i "$thread" "$pier" 2>&1 | tail -1)"
+        echo "commit poke: $out"
+        case "$out" in *%committed*) ;; *) echo "commit: the %kiln-commit poke did not answer" >&2; exit 1 ;; esac
+        # the commit is in when clay answers %cu for the desk's bill. click
+        # prints the answer as a bare noun (a loobean would read `0`), so
+        # the thread answers a tas.
+        thread="$RUNNER_TEMP/committed.hoon"
+        cat > "$thread" <<HOON
+        =/  m  (strand ,vase)
+        ;<  our=@p  bind:m  get-our
+        ;<  now=@da  bind:m  get-time
+        (pure:m !>(?:(.^(? %cu /(scot %p our)/$desk/(scot %da now)/desk/bill) %present %absent)))
+        HOON
+        committed=0
+        for i in $(seq 1 150); do
+          if click -k -i "$thread" "$pier" 2>/dev/null | tail -1 | grep -q '%present'; then
+            committed=1; echo "the desk committed after ~$((i * 2))s"; break
+          fi
+          sleep 2
+        done
+        [ "$committed" = 1 ] || {
+          echo "commit: clay never showed /=$desk=/desk/bill within 300 s" >&2
+          tmux capture-pane -t "$session" -p | tail -30 || true
+          exit 1
+        }
+        tmux capture-pane -t "$session" -p | grep -v '^\s*$' | tail -6 || true

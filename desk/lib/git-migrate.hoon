@@ -6,7 +6,7 @@
 ++  repository-1-to-2
   |=  repo=repository-1:git
   ^-  repository-3:git
-  =/  native-pulls=(list native-pull:git)
+  =/  native-pulls=(list native-pull-4:git)
     %+  turn  native-pulls.repo
     |=  pull=native-pull-1:git
     =/  source-ref=@t  ''
@@ -54,7 +54,7 @@
 ::
 ++  repository-3-to-4
   |=  repo=repository-3:git
-  ^-  repository:git
+  ^-  repository-4:git
   :*  owner.repo
       public-read.repo
       description.repo
@@ -82,6 +82,61 @@
       upstream-updates.repo
       notification-events.repo
       ~
+  ==
+::
+::  a stored pull request predates labels, so it starts with none
+::
+++  pull-4-to-5
+  |=  pull=native-pull-4:git
+  ^-  native-pull:git
+  :*  number.pull
+      source-ship.pull
+      source-repository.pull
+      source-ref.pull
+      target-ref.pull
+      title.pull
+      state.pull
+      head.pull
+      base.pull
+      comments.pull
+      ~
+  ==
+::
+::  a stored repository predates pull request labels: every field comes
+::  across as it was, and each pull request starts with no labels
+::
+++  repository-4-to-5
+  |=  repo=repository-4:git
+  ^-  repository:git
+  =/  native-pulls=(list native-pull:git)
+    (turn native-pulls.repo pull-4-to-5)
+  :*  owner.repo
+      public-read.repo
+      description.repo
+      head.repo
+      refs.repo
+      protected-refs.repo
+      objects.repo
+      writers.repo
+      readers.repo
+      write-token-hash.repo
+      lfs-objects.repo
+      lfs-uploads.repo
+      lfs-locks.repo
+      binding.repo
+      peer-origin.repo
+      github-origin.repo
+      github-issues.repo
+      github-pulls.repo
+      native-pulls
+      native-issues.repo
+      releases.repo
+      webhooks.repo
+      incoming-hook.repo
+      webhook-deliveries.repo
+      upstream-updates.repo
+      notification-events.repo
+      group-policy.repo
   ==
 ::
 ++  settle-webhook-repository
@@ -168,7 +223,7 @@
   |=  stored=state-3:git
   ^-  state-4:git
   =/  remaining=(list [@t repository-3:git])  ~(tap by repositories.stored)
-  =/  migrated=(map @t repository:git)  ~
+  =/  migrated=(map @t repository-4:git)  ~
   =.  migrated
     |-
     ?~  remaining  migrated
@@ -178,9 +233,27 @@
     $(remaining t.remaining)
   [%4 migrated peers.stored github-token.stored peer-prepare-queue.stored]
 ::
-++  settle-webhook-state
+::  a stored %4 predates pull request labels.  every repository comes
+::  forward with no label on any pull request, and the queue is kept
+::
+++  migrate-state-4
   |=  stored=state-4:git
-  ^-  state-4:git
+  ^-  state-5:git
+  =/  remaining=(list [@t repository-4:git])  ~(tap by repositories.stored)
+  =/  migrated=(map @t repository:git)  ~
+  =.  migrated
+    |-
+    ^-  (map @t repository:git)
+    ?~  remaining  migrated
+    =.  migrated
+      %+  ~(put by migrated)  -.i.remaining
+      (repository-4-to-5 +.i.remaining)
+    $(remaining t.remaining)
+  [%5 migrated peers.stored github-token.stored peer-prepare-queue.stored]
+::
+++  settle-webhook-state
+  |=  stored=state-5:git
+  ^-  state-5:git
   =/  remaining=(list [@t repository:git])  ~(tap by repositories.stored)
   =/  settled=(map @t repository:git)  ~
   |-

@@ -1,6 +1,7 @@
 ::  Native Git object database and Smart HTTP endpoint.
 ::
-/-  git, git-peer
+/-  ci, git, git-peer
+/+  ci-candidate, ci-changes, ci-forge, ci-writer
 /+  git-upload, dbug, default-agent, git-access, git-archive, git-blame, git-catalog, git-clay
 /+  git-clay-history, git-codec, git-github, git-graph, git-gzip, git-migrate, git-pack
 /+  git-pack-decode, git-protocol, git-storage, git-tree, git-webhook, server
@@ -71,6 +72,10 @@
       repository=@t
       message=@t
   ==
+::  CI-RECOVERY-1: a replica push %urgit-ci asked for, keyed by its GitHub
+::  job or its peer transfer: the ticket it is answered with, and its route
+::
++$  recovery-push  [ticket=@uv route=?(%github %peer)]
 ++  push-event-json
   |=  commands=(list receive-command:git)
   ^-  json
@@ -112,16 +117,123 @@
     ==
   `published
 ::
+::  the %ci-file, %ci-tree and %ci-ref peeks decode their segments here: a
+::  (scot %t ...) cord or a raw one, a 40-hex oid, and a slashed file path
+::  as a clay path
+::
+++  ci-segment
+  |=  segment=@t
+  ^-  @t
+  (fall (slaw %t segment) segment)
+::
+++  ci-oid
+  |=  text=@t
+  ^-  (unit oid:git)
+  ?.  =(40 (met 3 text))  ~
+  (oid-at:git-protocol [40 text] 0)
+::
+++  ci-path
+  |=  text=@t
+  ^-  path
+  =/  chars=tape  (trip text)
+  =|  segment=tape
+  =|  out=path
+  |-
+  =/  flushed=path  ?~(segment out [(crip (flop segment)) out])
+  ?~  chars  (flop flushed)
+  ?:  =('/' i.chars)
+    $(chars t.chars, segment ~, out flushed)
+  $(chars t.chars, segment [i.chars segment])
+::
+::  what the CI gate makes of one write (Q5; lib/ci-writer): it changes no
+::  CI-protected ref (%open); it is refused whole, with the answer's
+::  status and words (%refuse); or every CI-protected ref it would advance
+::  is to be staged as a candidate against its tip while no ref of the
+::  write moves (%stage)
+::
++$  ci-write  ci-write:ci-writer
+::
+::  what the push path's CI gate makes of one push (Q5): no command
+::  touches a CI-protected ref (%open); the push is refused whole
+::  (%refuse); a protected command is staged as a candidate and the push
+::  refused whole (%stage); or the push's one command advances a
+::  CI-protected ref to an object a live authority names at exactly its
+::  tip, and lands through the landing path (%land)
+::
++$  push-gate
+  $%  [%open ~]
+      [%refuse message=@t]
+      [%stage message=@t ref=@t head=oid:git base=oid:git]
+      [%land id=@uv pull=(unit @ud) ref=@t new=oid:git old=oid:git]
+  ==
+::
+::  the ref changes that replace one ref map with another, and whether an
+::  object contains a tip through commit parent links (Q5; lib/ci-writer,
+::  where ci-writer-vector tests them on fixtures)
+::
+++  ref-changes  ref-changes:ci-writer
+++  commit-contains  commit-contains:ci-writer
+::
+::  a parked Clay landing completes onto the repository as it is NOW,
+::  not the snapshot taken when it was parked: a push staged meanwhile
+::  (its objects merged, no ref moved) must survive the landing.  the
+::  landing's own objects, its one ref move and its pull merge are
+::  applied to the current record (found by P4's P11: a candidate
+::  staged during a parked landing lost its objects and its re-run
+::  failed at checkout).
+::
+++  land-onto-current
+  |=  [current=repository:git parked=repository:git branch=@t new-oid=oid:git pull=(unit @ud)]
+  ^-  repository:git
+  =/  objects=(map oid:git object:git)
+    =/  entries=(list [oid:git object:git])  ~(tap by objects.parked)
+    =/  acc=(map oid:git object:git)  objects.current
+    |-
+    ?~  entries  acc
+    $(entries t.entries, acc (~(put by acc) -.i.entries +.i.entries))
+  %=  current
+    objects  objects
+    refs  (~(put by refs.current) branch new-oid)
+    ::  a candidate the web merge staged for a pull lands that pull (D3a)
+    native-pulls
+      ?~  pull  native-pulls.current
+      %+  turn  native-pulls.current
+      |=  p=native-pull:git
+      ?:  &(=(number.p u.pull) =(%open state.p))  p(state %merged)  p
+  ==
+::
+::  a refusal's own words: the first quoted cord of the trace (a ~|
+::  message renders as 'text'), without its quotes; else the whole trace
+::
+++  refusal-text
+  |=  =tang
+  ^-  @t
+  =/  lines=(list tape)
+    %-  zing
+    %+  turn  tang
+    |=  =tank
+    (wash [0 200] tank)
+  =/  quoted=(list tape)
+    (skim lines |=(line=tape &(?=(^ line) =('\'' i.line))))
+  ?~  quoted  (tang-text tang)
+  =/  chars=tape  ?~(i.quoted ~ t.i.quoted)
+  =.  chars  (flop chars)
+  =.  chars  ?:(&(?=(^ chars) =('\'' i.chars)) t.chars chars)
+  (crip (flop chars))
+::
 
 --
 ::
 %-  agent:dbug
-=|  state-4:git
+=|  state-5:git
 =*  state  -
 =/  in-flight  *(map @uv lfs-request)
 =/  lfs-deletes  *(map @uv lfs-delete)
 =/  request-count=@ud  0
 =/  pending-clay  *(unit clay-push)
+::  the CI landing the clay-push in flight carries (P3 D9): the candidate
+::  id and the tip it expects, checked again in the completion event
+=/  pending-ci-land  *(unit [id=@uv expected=oid:git pull=(unit @ud)])
 =/  pending-publish  *(unit publish-job)
 =/  peer-serving  *(map @uv peer-serve)
 =/  peer-receiving  *(map @uv peer-receive)
@@ -141,10 +253,341 @@
 =/  github-in-flight  *(map @uv github-request)
 =/  github-results  *(map @uv github-result)
 =/  webhook-in-flight  *(map @uv webhook-flight)
+::  CI-RECOVERY-1: the replica pushes in flight that %urgit-ci asked for
+=/  recovery-pushes  *(map @uv recovery-push)
 ^-  agent:gall
+=>
+  ::  the door's helper core (fence touch 5): the %groups readers and the
+  ::  write rule, lifted unchanged out of on-poke's local core so on-peek can
+  ::  ask repository-writable for the ci-can-write peek.  the agent door's
+  ::  cast is exact, so they live here, reached as `:hc` with the bowl set.
+  ::
+  |_  =bowl:gall
+  ::
+  ::  a guarded read of this ship's %groups: ~ unless %groups is running,
+  ::  knows the group, and answers the path without crashing.  each scry is
+  ::  guarded by one that cannot answer [~ ~], because that answer kills the
+  ::  event even under +mule on the current runtime: gall itself answers the
+  ::  /$ liveness check, and %groups answers /u/groups/<flag> with a loobean
+  ::  whether the group exists or not.  the path read is
+  ::  /<under>/groups/<host>/<name>/<rest>, and rest ends in the mark asked
+  ::  for: gall hands the answer over as-is when %groups serves that mark,
+  ::  and otherwise converts it through the %groups desk's marks at request
+  ::  time, so a read asks for the served mark where that is known.  the only
+  ::  arm that scries %groups
+  ::
+  ++  group-peek
+    |=  [group=[host=@p name=@tas] under=path rest=path]
+    ^-  (unit *)
+    =/  prefix=path  /(scot %p our.bowl)/groups/(scot %da now.bowl)
+    =/  flag=path  /groups/(scot %p host.group)/[name.group]
+    =/  live=(each ? tang)
+      %-  mule
+      |.
+      .^(? %gu (weld prefix /$))
+    ?.  &(?=(%& -.live) p.live)  ~
+    =/  known=(each ? tang)
+      %-  mule
+      |.
+      .^(? %gu (weld prefix flag))
+    ?.  &(?=(%& -.known) p.known)  ~
+    =/  raw=(each * tang)
+      %-  mule
+      |.
+      .^(* %gx (weld prefix (weld under (weld flag rest))))
+    ?.  ?=(%& -.raw)  ~
+    `p.raw
+  ::
+  ::  the requester's seat in the repository's group, read from %groups in this
+  ::  event and never cached.  fails closed: anything short of a seat that
+  ::  soft-casts to our minimal shape is ~.
+  ::
+  ::  a group hosted here is authoritative.  a joined group is the host's
+  ::  mirror, believed only while %groups reports it initialised and this
+  ::  ship is still seated in it (+mirror-trusted); the initialised bit is
+  ::  the tail of the /v2/ui/groups/<flag> peek, [group init=? member-count=@ud],
+  ::  which %groups resets together with its copy whenever it rebuilds one.
+  ::  the only arm that turns %groups into a capability.
+  ::
+  ++  group-seat
+    |=  [policy=(unit group-policy:git) requester=@p]
+    ^-  (unit group-seat:git)
+    ?~  policy  ~
+    =/  group=[host=@p name=@tas]  group.u.policy
+    =/  seat-of
+      |=  who=@p
+      ^-  (unit group-seat:git)
+      =/  raw=(unit *)  (group-peek group / /seats/(scot %p who)/noun)
+      ?~  raw  ~
+      =/  seat=(each (unit group-seat:git) tang)
+        %-  mule
+        |.
+        ;;((unit group-seat:git) u.raw)
+      ?.  ?=(%& -.seat)  ~
+      p.seat
+    =/  net=?(%pub %sub)  ?:(=(our.bowl host.group) %pub %sub)
+    =/  init=?
+      ?:  ?=(%pub net)  %.y
+      =/  raw=(unit *)  (group-peek group /v2/ui /noun)
+      ?~  raw  %.n
+      =/  ui=(each [* init=? member-count=@ud] tang)
+        %-  mule
+        |.
+        ;;([* init=? member-count=@ud] u.raw)
+      ?.  ?=(%& -.ui)  %.n
+      init.p.ui
+    =/  seated=?  |(?=(%pub net) !=(~ (seat-of our.bowl)))
+    ?.  (mirror-trusted:git-access net init seated)  ~
+    (seat-of requester)
+  ::
+  ++  repository-group-capability
+    |=  [repo=repository:git requester=@p]
+    ^-  capability:git
+    ?~  group-policy.repo  %none
+    ?:  =(requester owner.repo)  %none
+    (group-capability:git-access group-policy.repo (group-seat group-policy.repo requester))
+  ::
+  ++  repository-writable
+    |=  [repo=repository:git requester=@p]
+    ^-  ?
+    %-  can-write:git-access
+    :*  owner.repo
+        writers.repo
+        (repository-group-capability repo requester)
+        requester
+    ==
+  ::
+  ::  the CI gate's reading of one ref for every writer and for the parked
+  ::  Clay completion (Q5), under the guards ci-gate-error reads it with:
+  ::  gall's %gu liveness first, under mule, and the %gx read only once it
+  ::  says yes, because a bare %gx answered [~ ~] kills the event even under
+  ::  mule.  %| carries why it cannot be read, and every caller then refuses
+  ::  the whole write, protected or not (the push path's outage rule)
+  ::
+  ++  ci-ref-protected
+    |=  [repo-name=@t ref=@t]
+    ^-  (each ? @t)
+    =/  prefix=path  /(scot %p our.bowl)/urgit-ci/(scot %da now.bowl)
+    =/  live=(each ? tang)
+      %-  mule
+      |.
+      .^(? %gu (weld prefix /$))
+    ?.  &(?=(%& -.live) p.live)
+      [%| 'ci: %urgit-ci is not running; protected-ref writes are refused until it is']
+    =/  protected=(each ? tang)
+      %-  mule
+      |.
+      ;;(? .^(* %gx (weld prefix /ci-protected/(scot %t repo-name)/(scot %t ref)/noun)))
+    ?.  ?=(%& -.protected)
+      [%| 'ci: protection could not be read; the write is refused']
+    ?.  p.protected  [%& %.n]
+    ::  CI-RECOVERY-1: while %urgit-ci is paused for a restore no
+    ::  CI-protected ref moves, so its write is refused with the reason
+    =/  paused=(each ? tang)
+      %-  mule
+      |.
+      ;;(? .^(* %gx (weld prefix /recovery-paused/noun)))
+    ?.  ?=(%& -.paused)
+      [%| 'ci: the CI pause could not be read, so the write is refused']
+    ?:  p.paused
+      [%| 'ci: CI is paused for a restore, so a CI-protected ref moves only after it resumes']
+    [%& %.y]
+  ::
+  ::  what the CI gate makes of one write (Q5).  a change that moves
+  ::  nothing is not asked about.  a CI-protected ref is never deleted and
+  ::  never created by a writer (a creation has no tip to stage a candidate
+  ::  against), and every CI-protected ref the write would advance is
+  ::  returned to be staged; then no ref of the write moves.  a writer never
+  ::  advances a CI-protected ref itself, even to an object %urgit-ci would
+  ::  land: only land-through does, which binds the tip and records the
+  ::  landing
+  ::
+  ++  ci-write-verdict
+    |=  [repo-name=@t changes=(list receive-command:git)]
+    ^-  ci-write
+    %+  classify:ci-writer  changes
+    |=(ref=@t (ci-ref-protected repo-name ref))
+  ::
+  ::  the refusal of a writer that cannot stage (Q5): an owner poke, or a
+  ::  branch or tag route.  ~ lets the write through: it changes no
+  ::  CI-protected ref
+  ::
+  ++  ci-write-refusal
+    |=  [repo-name=@t changes=(list receive-command:git)]
+    ^-  (unit [status=@ud message=@t])
+    (refusal:ci-writer (ci-write-verdict repo-name changes))
+  ::
+  ::  one CI-protected advance staged the way the push, the web editor and
+  ::  the web merge stage theirs (Q5): the id %urgit-ci will give the
+  ::  candidate (its trust class is the actor's standing, the rule the
+  ::  ci-can-write peek answers) and the %stage-candidate poke, naming the
+  ::  authenticated actor, never one a request supplied
+  ::
+  ++  ci-stage
+    |=  [repo-name=@t repo=repository:git ref=@t head=oid:git base=oid:git actor=@p =via:ci]
+    ^-  [id=@uv move=card]
+    =/  =trust:ci  ?:((repository-writable repo actor) %trusted %untrusted)
+    =/  id=@uv
+      ?:  =(%trusted trust)  (sham [repo-name ref head base])
+      (sham [repo-name ref head base %untrusted])
+    :-  id
+    :*  %pass  /ci/stage/(scot %uv id)
+        %agent  [our.bowl %urgit-ci]  %poke  %ci-action
+        !>(`action:ci`[%stage-candidate repo-name ref head base actor via ~])
+    ==
+  ::
+  ::  every staging of one write (Q5): the cards, and the answer's words in
+  ::  the push path's, one candidate per ref; no ref moved
+  ::
+  ++  ci-stages
+    |=  [repo-name=@t repo=repository:git stages=(list [ref=@t head=oid:git base=oid:git]) actor=@p =via:ci]
+    ^-  [text=@t cards=(list card)]
+    =|  text=@t
+    =|  cards=(list card)
+    |-
+    ?~  stages
+      [(rap 3 ~[text '; checks pending, no ref moved']) (flop cards)]
+    =/  staged=[id=@uv move=card]
+      (ci-stage repo-name repo ref.i.stages head.i.stages base.i.stages actor via)
+    =/  part=@t
+      (rap 3 ~['staged as ci candidate ' (scot %uv id.staged) ' for ' ref.i.stages])
+    %=  $
+      stages  t.stages
+      text  ?:(=('' text) part (rap 3 ~[text '; ' part]))
+      cards  [move.staged cards]
+    ==
+  ::
+  ::  the parked Clay write's last question (Q5), asked in the completion
+  ::  event that moves its branch, for every parked write that is not a CI
+  ::  landing.  ~ when the branch may move: it already holds the new object,
+  ::  or it is not CI-protected.  a branch that became CI-protected while
+  ::  the write was parked never moves here, whatever %urgit-ci would land:
+  ::  only land-through advances one.  %urgit-ci unreadable refuses.  a
+  ::  refusal comes after Clay accepted the desk, so the desk is written and
+  ::  the branch is not (P5's compensation obligation)
+  ::
+  ++  ci-completion-refusal
+    |=  [repo-name=@t ref=@t new=oid:git current=(unit oid:git)]
+    ^-  (unit @t)
+    ?:  =(`new current)  ~
+    =/  protected=(each ? @t)  (ci-ref-protected repo-name ref)
+    ?.  ?=(%& -.protected)  `p.protected
+    ?.  p.protected  ~
+    `(rap 3 ~['ci-protected ref ' ref ' became CI-protected while its linked desk update was in progress; the desk was written, the branch was not moved'])
+  ::
+  ::  what one event persisted, for %urgit-ci (Delivery 1C; lib/ci-forge):
+  ::  every repository's ref moves, pull request transitions and default
+  ::  branch change since the event began, one %forge-events poke each,
+  ::  after the event's own cards, so %urgit-ci reads the persisted state.
+  ::  a refused or no-op write persisted nothing and reports nothing
+  ::
+  ++  forge-cards
+    |=  [before=(map @t repository:git) after=(map @t repository:git) actor=@p route=@t]
+    ^-  (list card)
+    %+  turn  (forge-actions:ci-forge before after actor route now.bowl)
+    |=  act=action:ci
+    ^-  card
+    [%pass /ci/forge-events %agent [our.bowl %urgit-ci] %poke %ci-action !>(act)]
+  ::
+  ::  the authenticated sender of a poke and the route it wrote through: a
+  ::  web request's session, or for a push the repository's owner whose
+  ::  write token write-authorized admitted (CI-TRUST-P1); a peer by Ames,
+  ::  or for a packet that completes a receive, the receive's own origin
+  ::  among the flights as the event began (+receive-attribution,
+  ::  correction-04); a local agent or the dojo; %urgit-ci's landing request
+  ::
+  ++  poke-attribution
+    |=  [=mark =vase repos=(map @t repository:git) flights=(map @uv peer-receive)]
+    ^-  [actor=@p route=@t]
+    ?+  mark  [src.bowl mark]
+        %git-peer
+      =/  got=(each packet:git-peer tang)  (mule |.(!<(packet:git-peer vase)))
+      ?.  ?=(%& -.got)  [src.bowl 'peer']
+      [(receive-attribution p.got flights src.bowl our.bowl) 'peer']
+      %git-action  [src.bowl 'git-action']
+      %ci-action  [our.bowl 'CI landing']
+    ::
+        %handle-http-request
+      =/  got=(each [@ta inbound-request:eyre] tang)
+        (mule |.(!<([@ta inbound-request:eyre] vase)))
+      ?.  ?=(%& -.got)  [src.bowl 'web request']
+      =/  req=inbound-request:eyre  +.p.got
+      =/  site=(list @t)  site:(parse-request-line:server url.request.req)
+      =/  route=@t  (http-route:ci-forge site authenticated.req)
+      ?:  authenticated.req  [our.bowl route]
+      ?.  ?=([%git @ *] site)  [src.bowl route]
+      =/  found=(unit repository:git)  (~(get by repos) (repository-name i.t.site))
+      ?~  found  [src.bowl route]
+      [owner.u.found route]
+    ==
+  ::
+  ::  an Arvo event's attribution: a parked Clay write's completion is the
+  ::  write it parked — a peer's push, a web edit, a CI landing or a Smart
+  ::  HTTP push — and anything else is this ship's, by its wire
+  ::
+  ++  arvo-attribution
+    |=  [=wire parked=(unit clay-push)]
+    ^-  [actor=@p route=@t]
+    ?.  ?=([%clay-report ~] wire)
+      [our.bowl (rap 3 ~['arvo ' ?~(wire '' i.wire)])]
+    ?~  parked  [our.bowl 'linked desk']
+    ?^  peer-response.u.parked
+      [ship.u.peer-response.u.parked 'peer push (linked desk)']
+    ?:  api-response.u.parked  [our.bowl 'web editor (linked desk)']
+    ?:  =('' eyre-id.u.parked)  [our.bowl 'CI landing (linked desk)']
+    [our.bowl 'smart-http push (linked desk)']
+  ::
+  ::  CI-RECOVERY-1: the replica pushes %urgit-ci asked for that ended in
+  ::  this event, each answered to %urgit-ci with its ticket, and those
+  ::  still in flight.  a GitHub push ends when its result is no longer
+  ::  active, and GitHub's report-status line decided it.  a peer push
+  ::  ends when its offer is no longer outgoing.  only the peer's answer
+  ::  "fast-forward update accepted" confirms it.  a staged or refused
+  ::  answer is a failed backup
+  ::
+  ++  recovery-told
+    |=  $:  pushes=(map @uv recovery-push)
+            results=(map @uv github-result)
+            outgoing=(map @uv peer-offer-flight)
+            peers=(map @uv peer-result)
+        ==
+    ^-  [cards=(list card) pushes=(map @uv recovery-push)]
+    =/  done=(list [id=@uv push=recovery-push ok=? message=@t])
+      %+  murn  ~(tap by pushes)
+      |=  [id=@uv push=recovery-push]
+      ^-  (unit [id=@uv push=recovery-push ok=? message=@t])
+      ?-  route.push
+          %github
+        =/  r=(unit github-result)  (~(get by results) id)
+        ?~  r  `[id push %.n 'the GitHub push left no result']
+        ?:  active.u.r  ~
+        `[id push ok.u.r message.u.r]
+      ::
+          %peer
+        ?:  (~(has by outgoing) id)  ~
+        =/  r=(unit peer-result)  (~(get by peers) id)
+        ?~  r  `[id push %.n 'the peer push left no result']
+        =/  accepted=?  ?&(status.u.r =('fast-forward update accepted' message.u.r))
+        `[id push accepted message.u.r]
+      ==
+    =/  ended=(set @uv)  (silt (turn done |=([id=@uv *] id)))
+    =/  left=(map @uv recovery-push)
+      %-  malt
+      %+  skip  ~(tap by pushes)
+      |=([id=@uv *] (~(has in ended) id))
+    :_  left
+    %+  turn  done
+    |=  [id=@uv push=recovery-push ok=? message=@t]
+    ^-  card
+    :*  %pass  /ci/replica/(scot %uv ticket.push)
+        %agent  [our.bowl %urgit-ci]  %poke  %ci-action
+        !>(`action:ci`[%replica-result ticket.push ok message])
+    ==
+  --
 |_  =bowl:gall
 +*  this  .
     def  ~(. (default-agent this %|) bowl)
+    hc  ~(. +> bowl)
 ::
 ++  on-init
   ^-  (quip card _this)
@@ -159,15 +602,24 @@
 ++  on-load
   |=  old=vase
   ^-  (quip card _this)
-  =/  loaded=state-4:git
+  ::  every older state converts through each later one (state-5: pull
+  ::  request labels, none on a stored pull request)
+  ::
+  =/  loaded=state-5:git
     ?+  -.q.old  !!
         %0
+      %-  migrate-state-4
       %-  migrate-state-3
       (migrate-state-2 (migrate-state-1 (migrate-state-0 !<(state-0:git old))))
-      %1  (migrate-state-3 (migrate-state-2 (migrate-state-1 !<(state-1:git old))))
-      %2  (migrate-state-3 (migrate-state-2 !<(state-2:git old)))
-      %3  (migrate-state-3 !<(state-3:git old))
-      %4  !<(state-4:git old)
+    ::
+        %1
+      %-  migrate-state-4
+      (migrate-state-3 (migrate-state-2 (migrate-state-1 !<(state-1:git old))))
+    ::
+      %2  (migrate-state-4 (migrate-state-3 (migrate-state-2 !<(state-2:git old))))
+      %3  (migrate-state-4 (migrate-state-3 !<(state-3:git old)))
+      %4  (migrate-state-4 !<(state-4:git old))
+      %5  !<(state-5:git old)
     ==
   =.  loaded  (settle-webhook-state loaded)
   ::  re-arm the snapshot-build timer for every request still queued: a queue
@@ -188,6 +640,7 @@
         lfs-deletes  ~
         request-count  0
         pending-clay  ~
+        pending-ci-land  ~
         pending-publish  ~
         peer-serving  ~
         peer-receiving  ~
@@ -205,6 +658,7 @@
         github-in-flight  ~
         github-results  ~
         webhook-in-flight  ~
+        recovery-pushes  ~
       ==
   (weld requeued connect-cards)
 ::
@@ -213,12 +667,31 @@
   ^-  (quip card _this)
   =/  before=peer-ui-state
     [peer-activities notification-activities peer-results peer-receiving peer-outgoing]
+  =/  repos-before=(map @t repository:git)  repositories
   =/  result=(quip card _this)
     |^
       ?+  mark  (on-poke:def mark vase)
           %git-action
         ?>  =(src.bowl our.bowl)
         (handle-action !<(action:git vase))
+      ::
+          ::  the two %ci-actions %urgit answers: %urgit-ci asks for a candidate
+          ::  to be materialized, or for a passed candidate to be landed, and
+          ::  is poked back with the result
+          ::
+          %ci-action
+        ?>  =(src.bowl our.bowl)
+        =/  act=action:ci  !<(action:ci vase)
+        ?+  -.act  ~|([%urgit-ci-action-not-for-urgit -.act] !!)
+            %materialize-candidate
+          (materialize-candidate repo.act ref.act head.act base.act)
+        ::
+            %land-candidate
+          (land-candidate id.act repo.act ref.act candidate.act expected.act pull.act)
+        ::
+            %materialize-run
+          (materialize-run id.act repo.act ref.act head.act base.act)
+        ==
       ::
           %handle-http-request
         =+  !<([eyre-id=@ta req=inbound-request:eyre] vase)
@@ -233,81 +706,19 @@
       ==
     ::
     ::
-    ::  a guarded read of this ship's %groups: ~ unless %groups is running,
-    ::  knows the group, and answers the path without crashing.  each scry is
-    ::  guarded by one that cannot answer [~ ~], because that answer kills the
-    ::  event even under +mule on the current runtime: gall itself answers the
-    ::  /$ liveness check, and %groups answers /u/groups/<flag> with a loobean
-    ::  whether the group exists or not.  the path read is
-    ::  /<under>/groups/<host>/<name>/<rest>, and rest ends in the mark asked
-    ::  for: gall hands the answer over as-is when %groups serves that mark,
-    ::  and otherwise converts it through the %groups desk's marks at request
-    ::  time, so a read asks for the served mark where that is known.  the only
-    ::  arm that scries %groups
+    ::  the four %groups readers live in the door's helper core (fence touch
+    ::  5: on-peek reads repository-writable too); these keep every caller's
+    ::  spelling inside this core
     ::
     ++  group-peek
       |=  [group=[host=@p name=@tas] under=path rest=path]
       ^-  (unit *)
-      =/  prefix=path  /(scot %p our.bowl)/groups/(scot %da now.bowl)
-      =/  flag=path  /groups/(scot %p host.group)/[name.group]
-      =/  live=(each ? tang)
-        %-  mule
-        |.
-        .^(? %gu (weld prefix /$))
-      ?.  &(?=(%& -.live) p.live)  ~
-      =/  known=(each ? tang)
-        %-  mule
-        |.
-        .^(? %gu (weld prefix flag))
-      ?.  &(?=(%& -.known) p.known)  ~
-      =/  raw=(each * tang)
-        %-  mule
-        |.
-        .^(* %gx (weld prefix (weld under (weld flag rest))))
-      ?.  ?=(%& -.raw)  ~
-      `p.raw
-    ::
-    ::  the requester's seat in the repository's group, read from %groups in this
-    ::  event and never cached.  fails closed: anything short of a seat that
-    ::  soft-casts to our minimal shape is ~.
-    ::
-    ::  a group hosted here is authoritative.  a joined group is the host's
-    ::  mirror, believed only while %groups reports it initialised and this
-    ::  ship is still seated in it (+mirror-trusted); the initialised bit is
-    ::  the tail of the /v2/ui/groups/<flag> peek, [group init=? member-count=@ud],
-    ::  which %groups resets together with its copy whenever it rebuilds one.
-    ::  the only arm that turns %groups into a capability.
+      (group-peek:hc group under rest)
     ::
     ++  group-seat
       |=  [policy=(unit group-policy:git) requester=@p]
       ^-  (unit group-seat:git)
-      ?~  policy  ~
-      =/  group=[host=@p name=@tas]  group.u.policy
-      =/  seat-of
-        |=  who=@p
-        ^-  (unit group-seat:git)
-        =/  raw=(unit *)  (group-peek group / /seats/(scot %p who)/noun)
-        ?~  raw  ~
-        =/  seat=(each (unit group-seat:git) tang)
-          %-  mule
-          |.
-          ;;((unit group-seat:git) u.raw)
-        ?.  ?=(%& -.seat)  ~
-        p.seat
-      =/  net=?(%pub %sub)  ?:(=(our.bowl host.group) %pub %sub)
-      =/  init=?
-        ?:  ?=(%pub net)  %.y
-        =/  raw=(unit *)  (group-peek group /v2/ui /noun)
-        ?~  raw  %.n
-        =/  ui=(each [* init=? member-count=@ud] tang)
-          %-  mule
-          |.
-          ;;([* init=? member-count=@ud] u.raw)
-        ?.  ?=(%& -.ui)  %.n
-        init.p.ui
-      =/  seated=?  |(?=(%pub net) !=(~ (seat-of our.bowl)))
-      ?.  (mirror-trusted:git-access net init seated)  ~
-      (seat-of requester)
+      (group-seat:hc policy requester)
     ::
     ::  the ships seated in a group, for fanning discovery out to them.  the
     ::  group is believed on exactly the terms +group-seat believes it for
@@ -331,9 +742,7 @@
     ++  repository-group-capability
       |=  [repo=repository:git requester=@p]
       ^-  capability:git
-      ?~  group-policy.repo  %none
-      ?:  =(requester owner.repo)  %none
-      (group-capability:git-access group-policy.repo (group-seat group-policy.repo requester))
+      (repository-group-capability:hc repo requester)
     ::
     ++  repository-readable
       |=  [repo=repository:git requester=@p]
@@ -350,12 +759,7 @@
     ++  repository-writable
       |=  [repo=repository:git requester=@p]
       ^-  ?
-      %-  can-write:git-access
-      :*  owner.repo
-          writers.repo
-          (repository-group-capability repo requester)
-          requester
-      ==
+      (repository-writable:hc repo requester)
     ::
     ++  peer-activity-put
       |=  event=peer-activity
@@ -619,6 +1023,42 @@
           finish-pull
         ?:  =(%push purpose.flight)
           finish-push
+        ::  the CI gate (Q5): a fork's install or refresh writes every ref at
+        ::  once, so it is gated whole, like a push.  each CI-protected ref it
+        ::  would advance is staged as a candidate against its current tip, with
+        ::  this ship (the refresh's requester) as the actor, and then nothing
+        ::  moves: no ref, not the head, not the origin; the fetched objects join
+        ::  the store.  a CI-protected ref it would delete or create refuses the
+        ::  whole transfer, and so does an unreadable %urgit-ci
+        ::
+        =/  gate=ci-write
+          %+  ci-write-verdict:hc  local-repository.flight
+          (ref-changes ?~(existing ~ refs.u.existing) refs.flight)
+        ?:  ?=(%refuse -.gate)
+          =.  peer-receiving  (~(del by peer-receiving) transfer)
+          =.  peer-results
+            %+  ~(put by peer-results)
+              transfer
+            [%.n message.gate local-repository.flight]
+          =.  peer-activities  (peer-activity-finish transfer %.n message.gate)
+          `this
+        ?:  ?=(%stage -.gate)
+          ?~  existing
+            =/  lost=@t  'ci-protected ref has no repository to stage a candidate in'
+            =.  peer-receiving  (~(del by peer-receiving) transfer)
+            =.  peer-results  (~(put by peer-results) transfer [%.n lost local-repository.flight])
+            =.  peer-activities  (peer-activity-finish transfer %.n lost)
+            `this
+          =/  staged=[text=@t cards=(list card)]
+            (ci-stages:hc local-repository.flight u.existing stages.gate our.bowl %session)
+          =/  message=@t  (rap 3 ~['nothing applied: ' text.staged])
+          =.  repositories
+            %+  ~(put by repositories)  local-repository.flight
+            u.existing(objects (merge-objects objects.u.existing objects.flight))
+          =.  peer-receiving  (~(del by peer-receiving) transfer)
+          =.  peer-results  (~(put by peer-results) transfer [%.y message local-repository.flight])
+          =.  peer-activities  (peer-activity-finish transfer %.y message)
+          [cards.staged this]
         =/  repo=repository:git
           ?~  existing
             :*  our.bowl
@@ -678,6 +1118,34 @@
         =/  base-oid=oid:git  u.base
         ?:  =(incoming-oid base-oid)
           (peer-push-finish flight transfer %.n 'selected branches have identical tips')
+        ::  synchronize (Delivery 1C): an open pull request this ship opened
+        ::  from the same source branch onto the same target is updated, not
+        ::  opened again.  only the ship that opened it (by Ames: the flight's
+        ::  source is the offer's sender) updates it; its head and base follow
+        ::  the new tips, its number, title and comments stay; a transfer of
+        ::  the head it already has changes nothing
+        =/  prior=(unit native-pull:git)
+          %:  open-pull-from:ci-forge
+            native-pulls.u.existing  source.flight  source-repository.flight
+            selected-source-ref  target-ref.flight
+          ==
+        ?^  prior
+          ?:  =(head.u.prior incoming-oid)
+            %:  peer-push-finish  flight  transfer  %.y
+              (rap 3 ~['pull request #' (decimal number.u.prior) ' is already at that head'])
+            ==
+          =/  moved=native-pull:git  u.prior(head incoming-oid, base base-oid)
+          =/  updated=repository:git
+            %=  u.existing
+              objects  objects.flight
+              native-pulls
+                %+  turn  native-pulls.u.existing
+                |=(p=native-pull:git ?:(=(number.p number.u.prior) moved p))
+            ==
+          =.  repositories  (~(put by repositories) local-repository.flight updated)
+          %:  peer-push-finish  flight  transfer  %.y
+            (rap 3 ~['pull request #' (decimal number.u.prior) ' updated to the new head'])
+          ==
         =/  number=@ud  (add 1 (lent native-pulls.u.existing))
         =/  pull=native-pull:git
           :*  number
@@ -689,6 +1157,7 @@
               %open
               incoming-oid
               base-oid
+              ~
               ~
           ==
         =/  updated=repository:git
@@ -742,13 +1211,33 @@
           (~(has in u.reachable) u.previous)
         ?.  fast-forward
           (peer-push-finish flight transfer %.n 'update is not a fast-forward')
+        ::  the CI gate (Q5): a CI-protected default branch is never written by
+        ::  a peer push.  the offered head is staged as a candidate against the
+        ::  branch's current tip, with the pushing ship (authenticated by Ames,
+        ::  a writer when its offer arrived) as the actor: its objects join the
+        ::  store, no ref moves, the linked desk is untouched, and the pusher
+        ::  hears the staging.  an unreadable %urgit-ci refuses, protected or not
+        ::
+        =/  gate=ci-write
+          (ci-write-verdict:hc local-repository.flight ~[[previous `u.incoming head.u.existing]])
+        ?:  ?=(%refuse -.gate)
+          (peer-push-finish flight transfer %.n message.gate)
+        ?:  ?=(%stage -.gate)
+          =/  staged=[text=@t cards=(list card)]
+            (ci-stages:hc local-repository.flight u.existing stages.gate source.flight %session)
+          =.  repositories
+            %+  ~(put by repositories)  local-repository.flight
+            u.existing(objects (merge-objects objects.u.existing objects.flight))
+          =/  finished=(quip card _this)
+            (peer-push-finish flight transfer %.y text.staged)
+          [(weld cards.staged -.finished) +.finished]
         =/  updated=repository:git
           %=  u.existing
             objects  objects.flight
             refs  (~(put by refs.u.existing) head.u.existing u.incoming)
           ==
         ?^  binding.updated
-          ?:  |(=(^ pending-clay) =(^ pending-publish))
+          ?:  |(!=(~ pending-clay) !=(~ pending-publish))
             (peer-push-finish flight transfer %.n 'another Clay operation is in progress')
           =/  files=(unit (map path octs))
             (flatten-commit:git-clay objects.updated u.incoming)
@@ -871,6 +1360,12 @@
           message.packet
           result.packet
         ==
+          %ci-approve
+        (peer-ci-approve request.packet repository.packet candidate.packet)
+          %ci-request
+        (peer-ci-request request.packet repository.packet body.packet)
+          %forge-labels
+        (peer-forge-labels request.packet repository.packet number.packet labels.packet)
         %offer  (peer-offer-legacy offer.packet)
         %offer-branches  (peer-offer offer-branches.packet)
         %release  (peer-release transfer.packet)
@@ -1003,6 +1498,9 @@
           %:  pairs:enjs:format
             :~  ['repository' (public-repository-json-up-to repository u.found 50)]
                 ['pull' u.pull-json]
+                ::  whether the browsing ship may change the labels: the rule
+                ::  its %forge-labels request is decided by
+                ['labelsEditable' b+(repository-writable u.found target)]
             ==
           ==
         ?:  =(%commit view)
@@ -1337,6 +1835,108 @@
           ==
         [(weld notices -.replied) +.replied]
       --
+    ::
+    ::  a writer on another ship approves a CI candidate (P3 D9): the
+    ::  requester must be able to write the repository — the owner, a listed
+    ::  writer or a %write group seat, exactly what ci-can-write answers — and
+    ::  the approval itself is %urgit-ci's, poked with the requester as the
+    ::  actor; its ack or nack is the reply.
+    ::
+    ++  peer-ci-approve
+      |=  [request=@uv repository=@t candidate=@uv]
+      ^-  (quip card _this)
+      =/  found=(unit repository:git)  (~(get by repositories) repository)
+      ?.  &(?=(^ found) (repository-writable u.found src.bowl))
+        %:  peer-forge-reply
+          src.bowl
+          request
+          repository
+          %candidate
+          0
+          %.n
+          'requester cannot write the repository'
+          ~
+        ==
+      :_  this
+      :~  :*  %pass  /ci/approve/(scot %uv request)/(scot %p src.bowl)/(scot %t repository)
+              %agent  [our.bowl %urgit-ci]  %poke  %ci-action
+              !>(`action:ci`[%approve-candidate candidate src.bowl])
+          ==
+      ==
+    ::
+    ::  a writer on another ship sets a pull request's labels (state-5).
+    ::  the decision is +label-edit:ci-forge, the labels route's, with the
+    ::  Ames-authenticated sender as the requester: a reader, or the pull
+    ::  request's author when it cannot write, is refused with the reason.
+    ::  the answer is a %forge-result of kind %pull with the detail
+    ::
+    ++  peer-forge-labels
+      |=  [request=@uv repository=@t number=@ud labels=(list @t)]
+      ^-  (quip card _this)
+      =/  found=(unit repository:git)  (~(get by repositories) repository)
+      ?.  &(?=(^ found) (repository-readable u.found src.bowl))
+        %:  peer-forge-reply
+          src.bowl
+          request
+          repository
+          %pull
+          number
+          %.n
+          'repository is unavailable or requester is not authorized'
+          ~
+        ==
+      =/  edit=(each (set @t) [status=@ud message=@t])
+        %:  label-edit:ci-forge
+          (repository-writable u.found src.bowl)
+          (native-pull-at u.found number)
+          `labels
+        ==
+      ?:  ?=(%| -.edit)
+        (peer-forge-reply src.bowl request repository %pull number %.n message.p.edit ~)
+      =/  updated-repo=repository:git  (with-pull-labels:ci-forge u.found number p.edit)
+      =.  repositories  (~(put by repositories) repository updated-repo)
+      =/  pull=(unit native-pull:git)  (native-pull-at updated-repo number)
+      =/  result=(unit json)
+        ?~  pull  ~
+        (native-pull-detail-json repository updated-repo u.pull)
+      (peer-forge-reply src.bowl request repository %pull number %.y 'labels saved' result)
+    ::
+    ::  a delegate's CI policy request (P4, rider 02): the requester must be
+    ::  able to read the repository (a binding names a reader at least); the
+    ::  authority itself is %urgit-ci's decision, answered back on the wire
+    ::
+    ++  peer-ci-request
+      |=  [request=@uv repository=@t body=@t]
+      ^-  (quip card _this)
+      =/  found=(unit repository:git)  (~(get by repositories) repository)
+      ?.  &(?=(^ found) (repository-readable u.found src.bowl))
+        %:  peer-forge-reply
+          src.bowl
+          request
+          repository
+          %policy
+          0
+          %.n
+          'repository is unavailable or requester is not authorized'
+          ~
+        ==
+      ?:  (gth (met 3 body) 65.536)
+        %:  peer-forge-reply
+          src.bowl
+          request
+          repository
+          %policy
+          0
+          %.n
+          'request body is limited to 64 KiB'
+          ~
+        ==
+      :_  this
+      :~  :*  %pass  /ci/request/(scot %uv request)/(scot %p src.bowl)/(scot %t repository)
+              %agent  [our.bowl %urgit-ci]  %poke  %ci-action
+              !>(`action:ci`[%delegated src.bowl repository body])
+          ==
+      ==
     ::
     ++  peer-forge-create-issue
       |=  msg=forge-create-issue:git-peer
@@ -1695,8 +2295,14 @@
           |=  entry=[oid:git object:git]
           (lte p.data.+.entry peer-stream-max-object-bytes)
         =/  stream-pages=@ud  (peer-object-batch-count objects)
+        ::  an empty difference goes packed, in one empty pack page that %begin
+        ::  admits: peer-begin-objects admits no stream without an object.
+        ::  every object streamed takes at most peer-stream-max-object-pages
+        ::  pages, the bound peer-begin-objects checks
+        ::
         =/  streamable=?
-          ?&  (lte object-count peer-stream-max-objects)
+          ?&  (gth object-count 0)
+              (lte object-count peer-stream-max-objects)
               object-sizes-ok
               (lte stream-pages peer-stream-max-pages)
           ==
@@ -1999,7 +2605,7 @@
               (lte objects.msg peer-stream-max-objects)
               (gth pages.msg 0)
               (lte pages.msg peer-stream-max-pages)
-              (lte pages.msg (mul objects.msg 16))
+              (lte pages.msg (mul objects.msg peer-stream-max-object-pages))
               =(revision.msg 1)
           ==
         :_  this
@@ -2266,7 +2872,7 @@
       |^
         ?-  -.act
           %create  create
-          %delete  `this(repositories (~(del by repositories) name.act))
+          %delete  delete
           %put-object  put-object
           %set-ref  set-ref
           %delete-ref  delete-ref
@@ -2286,6 +2892,8 @@
           %publish-desk  publish-desk
           %add-peer  `this(peers (~(put in peers) peer.act))
           %remove-peer  `this(peers (~(del in peers) peer.act))
+          %write-recovery-commit  write-recovery-commit
+          %push-recovery-replica  push-recovery-replica
         ==
       ::
       ++  create
@@ -2324,6 +2932,22 @@
           ==
         `this(repositories (~(put by repositories) name.act repo))
       ::
+      ::  %urgit-ci keeps its own records under the name — candidates,
+      ::  attempts, the protection, credentials, daemon bindings — and a
+      ::  passed candidate of a deleted repository would let the same oid
+      ::  land unstaged in one re-created under the name (R18); told, it
+      ::  drops them
+      ::
+      ++  delete
+        ^-  (quip card _this)
+        ?>  ?=(%delete -.act)
+        :_  this(repositories (~(del by repositories) name.act))
+        :~  :*  %pass  /ci/deleted/(scot %t name.act)
+                %agent  [our.bowl %urgit-ci]  %poke  %ci-action
+                !>(`action:ci`[%repository-deleted name.act])
+            ==
+        ==
+      ::
       ++  put-object
         ^-  (quip card _this)
         ?>  ?=(%put-object -.act)
@@ -2341,6 +2965,13 @@
         ?~  found  `this
         ?.  (~(has by objects.u.found) oid.act)  `this
         =/  old=(unit oid:git)  (~(get by refs.u.found) ref.act)
+        ::  the CI gate (Q5): a CI-protected ref is never set here; it moves
+        ::  only by landing a candidate or a recorded override (land-through).
+        ::  an unreadable %urgit-ci refuses, protected or not.  a refusal nacks
+        ::
+        =/  refusal=(unit [status=@ud message=@t])
+          (ci-write-refusal:hc repository.act ~[[old `oid.act ref.act]])
+        ?^  refusal  ~|(message.u.refusal !!)
         =/  repo=repository:git  u.found(refs (~(put by refs.u.found) ref.act oid.act))
         =.  repositories  (~(put by repositories) repository.act repo)
         (dispatch-webhooks repository.act %push (push-event-json ~[[old `oid.act ref.act]]))
@@ -2352,9 +2983,120 @@
         ?~  found  `this
         =/  old=(unit oid:git)  (~(get by refs.u.found) ref.act)
         ?~  old  `this
+        ::  the CI gate (Q5): a CI-protected ref is never deleted, so it cannot
+        ::  be deleted and re-created around CI.  an unreadable %urgit-ci
+        ::  refuses, protected or not.  a refusal nacks
+        ::
+        =/  refusal=(unit [status=@ud message=@t])
+          (ci-write-refusal:hc repository.act ~[[old ~ ref.act]])
+        ?^  refusal  ~|(message.u.refusal !!)
         =/  repo=repository:git  u.found(refs (~(del by refs.u.found) ref.act))
         =.  repositories  (~(put by repositories) repository.act repo)
         (dispatch-webhooks repository.act %push (push-event-json ~[[old ~ ref.act]]))
+      ::
+      ::  CI-RECOVERY-1: a checkpoint commit %urgit-ci built.  every object
+      ::  id is computed here, and the commit must reach a complete tree.
+      ::  the repository must be private and bound to no desk.  the branch
+      ::  moves only from the tip the checkpoint was built on.  the CI gate
+      ::  still applies.  a recovery write sends no webhook.  a refusal
+      ::  nacks with the reason, which %urgit-ci records
+      ::
+      ++  write-recovery-commit
+        ^-  (quip card _this)
+        ?>  ?=(%write-recovery-commit -.act)
+        =/  found=(unit repository:git)  (~(get by repositories) repository.act)
+        ?~  found  ~|('the checkpoint repository does not exist' !!)
+        ?:  public-read.u.found
+          ~|('the checkpoint repository is public: a checkpoint is written only to a private repository' !!)
+        ?^  binding.u.found
+          ~|('the checkpoint repository is bound to a Clay desk: a checkpoint is not written there' !!)
+        ?.  ?&  (valid-ref:git-protocol ref.act)
+                (starts-with 'refs/heads/' ref.act)
+            ==
+          ~|('the checkpoint ref is not a branch' !!)
+        =/  current=(unit oid:git)  (~(get by refs.u.found) ref.act)
+        ?.  =(current expected.act)
+          ~|('the checkpoint branch moved after the checkpoint was built, so nothing was written' !!)
+        =/  incoming=(map oid:git object:git)
+          %-  malt
+          %+  turn  objects.act
+          |=(o=object:git [(object-oid:git-codec kind.o data.o) o])
+        =/  head=(unit object:git)  (~(get by incoming) commit.act)
+        ?.  ?&(?=(^ head) =(%commit kind.u.head))
+          ~|('the checkpoint commit is not among the objects written' !!)
+        =/  merged=(map oid:git object:git)  (merge-objects objects.u.found incoming)
+        =/  closure=(unit (set oid:git))  (reachable:git-graph merged (silt ~[commit.act]))
+        ?~  closure
+          ~|('the checkpoint commit does not reach a complete tree' !!)
+        =/  refusal=(unit [status=@ud message=@t])
+          (ci-write-refusal:hc repository.act ~[[current `commit.act ref.act]])
+        ?^  refusal  ~|(message.u.refusal !!)
+        =/  repo=repository:git
+          u.found(objects merged, refs (~(put by refs.u.found) ref.act commit.act))
+        `this(repositories (~(put by repositories) repository.act repo))
+      ::
+      ::  CI-RECOVERY-1: a checkpoint branch pushed to the repository's own
+      ::  origin through the existing paths.  that is a GitHub origin with
+      ::  the stored token, else the ship the repository was forked from.
+      ::  the push ends later, and the tail of that event answers %urgit-ci
+      ::  with the ticket (+recovery-told).  no origin at all nacks with the
+      ::  reason
+      ::
+      ++  push-recovery-replica
+        ^-  (quip card _this)
+        ?>  ?=(%push-recovery-replica -.act)
+        =/  found=(unit repository:git)  (~(get by repositories) repository.act)
+        ?~  found  ~|('the checkpoint repository is gone' !!)
+        ?:  public-read.u.found
+          ~|('the checkpoint repository is public: its replica is not pushed' !!)
+        ?.  (~(has by refs.u.found) ref.act)
+          ~|('the checkpoint branch is missing' !!)
+        ?^  github-origin.u.found
+          ?~  github-token
+            ~|('the checkpoint repository has a GitHub origin, but no GitHub token is connected' !!)
+          =/  owner=@t  owner.u.github-origin.u.found
+          =/  remote=@t  repository.u.github-origin.u.found
+          =/  job=@uv  `@uv`(shas %git-github-request (cat 3 eny.bowl request-count))
+          =.  request-count  +(request-count)
+          =/  ctx=github-request
+            [job %push repository.act owner remote public-read.u.found ref.act ~ 0 ~ 0]
+          =.  github-in-flight  (~(put by github-in-flight) job ctx)
+          =.  github-results
+            (~(put by github-results) job [%.y %.n %push repository.act 'contacting GitHub'])
+          =.  recovery-pushes  (~(put by recovery-pushes) job [ticket.act %github])
+          =/  =request:http
+            :*  %'GET'
+                (git-url:git-github owner remote '/info/refs?service=git-receive-pack')
+                (receive-headers:git-github github-token ~)
+                ~
+            ==
+          :_  this
+          :~  [%pass /github/(scot %uv job) %arvo %i %request request *outbound-config:iris]
+          ==
+        ?^  peer-origin.u.found
+          ?.  =(ref.act head.u.found)
+            ~|('a peer replica receives only the default branch, and the checkpoint branch is another' !!)
+          =/  peer=@p  ship.u.peer-origin.u.found
+          =/  raw-transfer=@uv  `@uv`(shas %git-peer-push (cat 3 eny.bowl request-count))
+          =/  transfer=@uv  (peer-object-transfer raw-transfer)
+          =.  request-count  +(request-count)
+          =.  peer-results
+            (~(put by peer-results) transfer [%.n 'offering update' repository.act])
+          =.  peer-outgoing
+            (~(put by peer-outgoing) transfer [peer repository.act %push])
+          =.  peer-activities
+            %:  peer-activity-start
+              transfer  %push  %outgoing  peer  repository.act  'offering update'
+            ==
+          =.  recovery-pushes  (~(put by recovery-pushes) transfer [ticket.act %peer])
+          :_  this
+          :~  %^  peer-card
+                peer
+                /peer/offer/(scot %uv transfer)
+              [%offer transfer repository.u.peer-origin.u.found repository.act %.n '']
+              [%pass /peer/offer-timeout/(scot %uv transfer) %arvo %b %wait (add now.bowl ~m11)]
+          ==
+        ~|('no replica is configured: the checkpoint repository has no GitHub origin and is no fork of another ship\'s repository' !!)
       ::
       ++  set-protected
         ^-  (quip card _this)
@@ -2515,6 +3257,20 @@
           =/  published=(unit repository:git)
             (publish-repository u.found job our.bowl now.bowl)
           ?~  published  `this
+          ::  the CI gate (Q5): a publication advances the bound branch, so a
+          ::  CI-protected one is staged, never written, as the %clay-publish
+          ::  completion stages the publication of a desk with files
+          ::
+          =/  gate=ci-write
+            %+  ci-write-verdict:hc  repository.job
+            ~[[(~(get by refs.u.found) branch.job) (~(get by refs.u.published) branch.job) branch.job]]
+          ?:  ?=(%refuse -.gate)  ~|(message.gate !!)
+          ?:  ?=(%stage -.gate)
+            =/  staged=[text=@t cards=(list card)]
+              (ci-stages:hc repository.job u.found stages.gate our.bowl %session)
+            =.  repositories
+              (~(put by repositories) repository.job u.found(objects objects.u.published))
+            [cards.staged this]
           =.  repositories  (~(put by repositories) repository.job u.published)
           `this
         :_  this(pending-publish `job)
@@ -2955,7 +3711,7 @@
       [[card ~] `[id event name message now.bowl]]
     ::
     ++  accept-receive
-      |=  $:  eyre-id=@ta
+      |=  $:  eyre-id=(unit @ta)
               name=@t
               commands=(list receive-command:git)
               applied=repository:git
@@ -2965,20 +3721,392 @@
       =.  repositories  (~(put by repositories) name applied)
       =^  push-cards  this
         (dispatch-webhooks name %push (push-event-json commands))
+      ::  a landing (land-candidate) has no request to answer
+      ::
+      =/  answer=(list card)
+        ?~  eyre-id  ~
+        %+  give-simple-payload:app:server  u.eyre-id
+        (receive-payload 'ok' (receive-results commands %.y ''))
       ?~  clay
         :_  this
-        %+  weld  push-cards
-        %+  give-simple-payload:app:server  eyre-id
-        (receive-payload 'ok' (receive-results commands %.y ''))
+        (weld push-cards answer)
       =/  data=json
         %-  pairs:enjs:format
         ~[['desk' s+desk-name.u.clay] ['commit' s+(oid-text:git-codec commit.u.clay)]]
       =^  sync-cards  this
         (dispatch-webhooks name %clay-sync data)
       :_  this
-      %+  weld  (weld push-cards sync-cards)
-      %+  give-simple-payload:app:server  eyre-id
-      (receive-payload 'ok' (receive-results commands %.y ''))
+      (weld (weld push-cards sync-cards) answer)
+    ::
+    ::  the CI gate.  %urgit-ci holds the set of CI-protected refs and the
+    ::  candidates it has passed; %urgit only asks.  a push to a CI-protected
+    ::  ref never moves it through the receive path (Q5): an object a live
+    ::  authority names at exactly the ref's tip lands through land-through,
+    ::  which binds the tip, requires descent and records the landing, and
+    ::  anything else is staged as a candidate.  the reads are guarded the
+    ::  way group-peek guards %groups: gall's %gu liveness answer first, under
+    ::  mule, and the %gx reads only once it says yes, because a bare %gx
+    ::  answered [~ ~] kills the event even under mule.  the gate fails
+    ::  closed: when %urgit-ci is not running, membership cannot be read, so
+    ::  every ref in the push is refused, protected or not.
+    ::
+    ++  ci-gate-error
+      |=  [repo-name=@t repo=repository:git commands=(list receive-command:git)]
+      ^-  push-gate
+      =/  outage=@t
+        'ci: %urgit-ci is not running; protected-ref writes are refused until it is'
+      =/  prefix=path  /(scot %p our.bowl)/urgit-ci/(scot %da now.bowl)
+      =/  live=(each ? tang)
+        %-  mule
+        |.
+        .^(? %gu (weld prefix /$))
+      ?.  &(?=(%& -.live) p.live)
+        [%refuse outage]
+      =/  peek
+        |=  rest=path
+        ^-  (unit ?)
+        =/  raw=(each ? tang)
+          %-  mule
+          |.
+          ;;(? .^(* %gx (weld prefix (snoc rest %noun))))
+        ?.  ?=(%& -.raw)  ~
+        `p.raw
+      =/  remaining=(list receive-command:git)  commands
+      |-
+      ?~  remaining  [%open ~]
+      =/  command=receive-command:git  i.remaining
+      =/  ci-protected=(unit ?)
+        (peek /ci-protected/(scot %t repo-name)/(scot %t ref.command))
+      ?~  ci-protected
+        [%refuse outage]
+      ?.  u.ci-protected
+        $(remaining t.remaining)
+      ?~  new.command
+        [%refuse 'ci-protected branch cannot be deleted']
+      ?~  old.command
+        [%refuse 'ci-protected branch has no tip to stage a candidate against']
+      ::  P4, Q5: the exact authority that lands this object over this tip —
+      ::  a landable candidate staged against the tip, or a live override
+      ::  naming both — read in the ci-read shape, a unit that is never
+      ::  [~ ~].  its landing is the push's only command, so the push stays
+      ::  atomic; land-through reads the one landing predicate again.  an
+      ::  unreadable or malformed answer refuses the push
+      ::
+      =/  authority=(each (unit [id=@uv pull=(unit @ud)]) tang)
+        %-  mule
+        |.
+        ;;((unit [id=@uv pull=(unit @ud)]) .^(* %gx (weld prefix /landing-for/(scot %t repo-name)/(scot %t ref.command)/(scot %t (oid-text:git-codec u.new.command))/(scot %t (oid-text:git-codec u.old.command))/noun)))
+      ?.  ?=(%& -.authority)
+        [%refuse 'ci: the landing authority could not be read; the push is refused']
+      ?^  p.authority
+        ?.  ?=([* ~] commands)
+          [%refuse 'a ci-protected ref lands alone: push it without other refs']
+        [%land id.u.p.authority pull.u.p.authority ref.command u.new.command u.old.command]
+      =/  id=@uv  (sham [repo-name ref.command u.new.command u.old.command])
+      :*  %stage
+          (rap 3 ~['staged as ci candidate ' (scot %uv id) '; checks pending'])
+          ref.command
+          u.new.command
+          u.old.command
+      ==
+    ::
+    ::  the CI gate for the web editor (Q4).  a file written or deleted
+    ::  through the web API is a write to its branch like a push or a merge,
+    ::  so a CI-protected branch never moves here (native-ci.md: a web edit
+    ::  to a CI-protected branch is never applied).  the new commit's objects
+    ::  enter the store, the ref stays where it is, and the commit is staged
+    ::  against the branch's current tip the way the web merge stages a
+    ::  pull's head (D3a): the actor is the ship's own session, the only one
+    ::  the API admits, and the trust class and id are the ones %urgit-ci
+    ::  will find through ci-can-write.  %urgit-ci is read the merge's way,
+    ::  liveness first, then membership, both under mule, and an unreadable
+    ::  answer refuses the edit, protected or not.  ~ lets the edit through:
+    ::  its branch is not CI-protected.
+    ::
+    ++  web-edit-ci-gate
+      |=  $:  eyre-id=@ta
+              name=@t
+              repo=repository:git
+              ref=@t
+              base=(unit oid:git)
+              head=oid:git
+              objects=(map oid:git object:git)
+          ==
+      ^-  (unit (quip card _this))
+      =/  ci-prefix=path  /(scot %p our.bowl)/urgit-ci/(scot %da now.bowl)
+      =/  ci-live=(each ? tang)
+        %-  mule
+        |.
+        .^(? %gu (weld ci-prefix /$))
+      ?.  &(?=(%& -.ci-live) p.ci-live)
+        `[(api-error eyre-id 503 'ci: %urgit-ci is not running; protected-ref writes are refused until it is') this]
+      =/  ci-protected=(each ? tang)
+        %-  mule
+        |.
+        ;;(? .^(* %gx (weld ci-prefix /ci-protected/(scot %t name)/(scot %t ref)/noun)))
+      ?.  ?=(%& -.ci-protected)
+        `[(api-error eyre-id 503 'ci: protection could not be read; the edit is refused') this]
+      ?.  p.ci-protected  ~
+      ?~  base
+        `[(api-error eyre-id 409 'ci-protected branch has no tip to stage a candidate against') this]
+      =/  =trust:ci
+        ?:((repository-writable repo our.bowl) %trusted %untrusted)
+      =/  id=@uv
+        ?:  =(%trusted trust)  (sham [name ref head u.base])
+        (sham [name ref head u.base %untrusted])
+      =.  repositories  (~(put by repositories) name repo(objects objects))
+      :-  ~
+      :_  this
+      :-  :*  %pass  /ci/stage/(scot %uv id)
+              %agent  [our.bowl %urgit-ci]  %poke  %ci-action
+              !>(`action:ci`[%stage-candidate name ref head u.base our.bowl %session ~])
+          ==
+      ::  staged, not committed: the answer names the candidate and its head,
+      ::  never a commit the branch has
+      ::
+      %^  api-json  eyre-id  202
+      %-  pairs:enjs:format
+      :~  ['ok' b+%.y]
+          ['staged' b+%.y]
+          ['candidate' s+(scot %uv id)]
+          ['trust' s+trust]
+          ['actor' s+(scot %p our.bowl)]
+          ['head' s+(oid-text:git-codec head)]
+          ['base' s+(oid-text:git-codec u.base)]
+      ==
+    ::
+    ::  candidate materialization for %urgit-ci: the exact integration object
+    ::  for a staged head, built without moving any ref.  a fast-forward
+    ::  candidate is the head itself; a divergent head is merged onto the base
+    ::  tip with the pull-request merge, and the new objects enter the store.
+    ::  %urgit-ci is poked back with the object, or with a conflict.
+    ::
+    ++  materialize-candidate
+      |=  [repo-name=@t ref=@t head=oid:git base=oid:git]
+      ^-  (quip card _this)
+      =/  reply
+        |=  act=action:ci
+        ^-  card
+        [%pass /ci/materialize %agent [our.bowl %urgit-ci] %poke %ci-action !>(act)]
+      =/  found=(unit repository:git)  (~(get by repositories) repo-name)
+      ?~  found
+        :_  this  ~[(reply [%candidate-conflict repo-name ref head base])]
+      =/  outcome=outcome:ci-candidate
+        %:  materialize:ci-candidate
+          objects.u.found
+          head
+          base
+          our.bowl
+          now.bowl
+          (rap 3 ~['Merge ' (oid-text:git-codec head) ' into ' ref])
+        ==
+      ?:  ?=(%conflict -.outcome)
+        :_  this  ~[(reply [%candidate-conflict repo-name ref head base])]
+      ::  the candidate's objects stay reachable for the runner's clone on a
+      ::  scratch ref named by the candidate id; %urgit-ci deletes it through
+      ::  %delete-ref when the candidate closes.  upload-pack serves only
+      ::  ref-reachable objects, so the ref is the contract, not a courtesy.
+      ::
+      =/  scratch=@t
+        (rap 3 ~['refs/ci/candidate/' (scot %uv (sham [repo-name ref head base]))])
+      =.  repositories
+        %+  ~(put by repositories)  repo-name
+        %=  u.found
+          objects  objects.outcome
+          refs  (~(put by refs.u.found) scratch candidate.outcome)
+        ==
+      :_  this
+      ~[(reply [%candidate-ready repo-name ref head base candidate.outcome])]
+    ::
+    ::  a pull request run's integration object for %urgit-ci (Delivery
+    ::  1C): the head merged onto the target's tip as materialize-candidate
+    ::  builds it, kept reachable under the run's own scratch ref
+    ::  refs/ci/run/<id>, never one another run shares; %urgit-ci hears the
+    ::  object or the conflict.  no ref but that scratch ref moves
+    ::
+    ++  materialize-run
+      |=  [id=@uv repo-name=@t ref=@t head=oid:git base=oid:git]
+      ^-  (quip card _this)
+      =/  reply
+        |=  act=action:ci
+        ^-  card
+        [%pass /ci/materialize-run %agent [our.bowl %urgit-ci] %poke %ci-action !>(act)]
+      =/  found=(unit repository:git)  (~(get by repositories) repo-name)
+      ?~  found
+        :_  this  ~[(reply [%run-conflict id 'repository not found'])]
+      =/  outcome=outcome:ci-candidate
+        %:  materialize:ci-candidate
+          objects.u.found
+          head
+          base
+          our.bowl
+          now.bowl
+          (rap 3 ~['Merge ' (oid-text:git-codec head) ' into ' ref])
+        ==
+      ?:  ?=(%conflict -.outcome)
+        :_  this  ~[(reply [%run-conflict id reason.outcome])]
+      =/  scratch=@t  (rap 3 ~['refs/ci/run/' (scot %uv id)])
+      =.  repositories
+        %+  ~(put by repositories)  repo-name
+        %=  u.found
+          objects  objects.outcome
+          refs  (~(put by refs.u.found) scratch candidate.outcome)
+        ==
+      :_  this
+      ~[(reply [%run-ready id candidate.outcome])]
+    ::
+    ::  landing for %urgit-ci (CI-LAND-1): inside this one event, the
+    ::  candidate's eligibility is read again from %urgit-ci under the same
+    ::  guards ci-gate-error uses, the ref's tip is compared with the tip the
+    ::  candidate was staged against, and the ref advances through the receive
+    ::  path's two arms for a plain repository: apply-receive compares the old
+    ::  tip and writes the ref into the repository value, accept-receive
+    ::  persists it and dispatches the webhooks.  a tip that moved refuses; the
+    ::  candidate stays passed and unlanded until the pusher rebases.  a
+    ::  repository bound to a Clay desk is refused (CI-LINKED-DESK-P1): its
+    ::  receive path writes the ref asynchronously, not in one event.
+    ::
+    ++  land-candidate
+      |=  [id=@uv repo-name=@t ref=@t candidate=oid:git expected=oid:git pull=(unit @ud)]
+      ^-  (quip card _this)
+      (land-through id repo-name ref candidate expected pull ~)
+    ::
+    ::  the landing path itself (CI-LAND-1; Q5), for %urgit-ci's landing
+    ::  request and for a push of an object a live authority names at this
+    ::  tip.  .push is the push's request, answered from the landing: ok, or
+    ::  the refusal as the command's ng, in this event or from the parked
+    ::  Clay completion.  in the event that moves the ref three things hold:
+    ::  %urgit-ci's one landing predicate for this object over this tip, the
+    ::  ref still at that tip, and the object containing that tip.  so a
+    ::  CI-protected ref only ever moves forward, never back to a tip it
+    ::  left, and no authority bound to a tip it left can move it again,
+    ::  whatever %urgit-ci's record of the landing says: %landed is that
+    ::  record, not the replay guard
+    ::
+    ++  land-through
+      |=  $:  id=@uv
+              repo-name=@t
+              ref=@t
+              candidate=oid:git
+              expected=oid:git
+              pull=(unit @ud)
+              push=(unit @ta)
+          ==
+      ^-  (quip card _this)
+      =/  commands=(list receive-command:git)  ~[[`expected `candidate ref]]
+      =/  refuse
+        |=  reason=@t
+        ^-  (quip card _this)
+        :_  this
+        :-  [%pass /ci/land %agent [our.bowl %urgit-ci] %poke %ci-action !>(`action:ci`[%land-refused id reason])]
+        ?~  push  ~
+        %+  give-simple-payload:app:server  u.push
+        (receive-payload 'ok' (receive-results commands %.n reason))
+      =/  prefix=path  /(scot %p our.bowl)/urgit-ci/(scot %da now.bowl)
+      =/  live=(each ? tang)
+        %-  mule
+        |.
+        .^(? %gu (weld prefix /$))
+      ?.  &(?=(%& -.live) p.live)
+        (refuse 'ci: %urgit-ci is not running; the candidate cannot be landed')
+      ::  P4: eligible-at binds the check to the tip this landing replaces
+      =/  eligible=(each ? tang)
+        %-  mule
+        |.
+        ;;(? .^(* %gx (weld prefix /eligible-at/(scot %t repo-name)/(scot %t ref)/(scot %t (oid-text:git-codec candidate))/(scot %t (oid-text:git-codec expected))/noun)))
+      ?.  &(?=(%& -.eligible) p.eligible)
+        (refuse 'candidate is not eligible to land')
+      =/  found=(unit repository:git)  (~(get by repositories) repo-name)
+      ?~  found  (refuse 'repository not found')
+      ?.  =(`expected (~(get by refs.u.found) ref))
+        (refuse 'destination moved; rebase and push again')
+      ::  Q5: the object must contain the tip it replaces.  every candidate
+      ::  contains its base (ci-candidate: the head for a fast-forward, the
+      ::  base itself when already merged, else a merge onto the base), so
+      ::  this refuses only an override of a candidate staged against another
+      ::  tip, which would drop this tip's commits: no override authorizes that
+      ::
+      ?.  (commit-contains objects.u.found candidate expected)
+        %-  refuse
+        'candidate does not contain the destination tip; rebuild it against the current tip'
+      =/  applied=(unit repository:git)  (apply-receive u.found commands ~)
+      ?~  applied  (refuse 'candidate object is missing from the store')
+      ::  a candidate the web merge staged for a pull request lands that
+      ::  pull (D3a): it reads merged only now, never at the click
+      ::
+      =/  landed=repository:git
+        ?~  pull  u.applied
+        %=  u.applied
+          native-pulls
+            %+  turn  native-pulls.u.applied
+            |=  p=native-pull:git
+            ?:  &(=(number.p u.pull) =(%open state.p))  p(state %merged)  p
+        ==
+      =/  landed-card=card
+        [%pass /ci/land %agent [our.bowl %urgit-ci] %poke %ci-action !>(`action:ci`[%landed id])]
+      ::  a repository bound to a Clay desk (P3 D9, CI-LINKED-DESK-P1-B
+      ::  alternative A): when the landing ref is the linked branch, the
+      ::  candidate's tree goes to the desk first, the way a linked push
+      ::  does — parked as the clay-push, written by %urgit-clay, reported
+      ::  back — and the ref advances in the completion event, after the
+      ::  eligibility and the tip are checked once more.  any other ref of a
+      ::  bound repository lands in this event like a plain one.
+      ::
+      ?.  &(?=(^ binding.u.found) =(ref branch.u.binding.u.found))
+        =^  cards  this  (accept-receive push repo-name commands landed ~)
+        :_  this
+        (snoc cards landed-card)
+      ::  one clay-push at a time: a second landing while one is parked is
+      ::  refused with its reason, never parked over the first (the receive
+      ::  path's `=(^ pending-clay)` is a bare-wing comparison that is never
+      ::  true; a loobean test, so the subject is not refined for the =^ below)
+      ::
+      ?:  |(!=(~ pending-clay) !=(~ pending-publish))
+        (refuse 'linked desk update already in progress; re-run the candidate to land it')
+      =/  files=(unit (map path octs))
+        (flatten-commit:git-clay objects.landed candidate)
+      ?~  files
+        (refuse 'linked branch must resolve to a valid desk-shaped Git commit')
+      ::  reading the desk back can crash in Clay (a mark the desk cannot
+      ::  build, e.g. a file whose mark's grad names a mark the desk lacks):
+      ::  the landing is refused with the reason, never nacked
+      ::
+      =/  tried=(each (unit nori:clay) tang)
+        %-  mule
+        |.
+        (clay-delta our.bowl now.bowl desk-name.u.binding.u.found u.files)
+      =/  delta=(unit nori:clay)  ?:(?=(%& -.tried) p.tried ~)
+      ?~  delta
+        (refuse 'unable to read linked Clay desk')
+      ?>  ?=(%& -.u.delta)
+      ?:  =(~ p.u.delta)
+        =^  cards  this
+          (accept-receive push repo-name commands landed `[desk-name.u.binding.u.found candidate])
+        :_  this
+        (snoc cards landed-card)
+      =/  pending=clay-push
+        =/  start-at=@da  (add now.bowl ~s1)
+        =/  timeout-at=@da  (add now.bowl ~s15)
+        :*  (fall push '')
+            %.n
+            ~
+            repo-name
+            commands
+            landed
+            desk-name.u.binding.u.found
+            branch.u.binding.u.found
+            candidate
+            u.delta
+            ~
+            start-at
+            timeout-at
+        ==
+      =.  pending-clay  `pending
+      =.  pending-ci-land  `[id expected pull]
+      :_  this
+      :~  [%pass /clay-start %arvo %b %wait start-at.pending]
+          [%pass /clay-timeout %arvo %b %wait timeout-at.pending]
+      ==
     ::
     ++  handle-incoming-hook
       |=  [eyre-id=@ta req=inbound-request:eyre name=@t]
@@ -3368,7 +4496,7 @@
           eyre-id
           200
         (pairs:enjs:format ~[['ok' b+%.y] ['commit' s+(oid-text:git-codec commit)]])
-      ?:  |(=(^ pending-clay) =(^ pending-publish))
+      ?:  |(!=(~ pending-clay) !=(~ pending-publish))
         :_  this
         (api-error eyre-id 409 'another Clay operation is in progress')
       =/  clay-files=(unit (map path octs))
@@ -3899,6 +5027,11 @@
             [%'GET' %peer %forge ~]  get-peer-forge
             [%'DELETE' %peer %forge ~]  delete-peer-forge
             [%'POST' %peer %issues ~]  post-peer-issues
+              [%'POST' %peer %ci-approve ~]
+            post-peer-ci-approve
+              [%'POST' %peer %ci-action ~]
+            post-peer-ci-action
+            [%'POST' %peer %labels ~]  post-peer-labels
             [%'POST' %peer %forge ~]  post-peer-forge
             [%'GET' %peer %discoveries ~]  get-peer-discoveries
             [%'POST' %peer %discover ~]  post-peer-discover
@@ -4185,6 +5318,161 @@
             :_  this
             (api-error eyre-id 422 'ship must be a valid Urbit ID')
           (start-peer-forge-issue eyre-id u.peer u.repository u.title u.body)
+        ::
+        ::  a writer's labels for a pull request on another ship's repository
+        ::  (state-5): sent over the peer protocol, decided by the owner, and
+        ::  tracked and read back like a forge comment (GET /peer/forge, kind
+        ::  pull).  the owner checks the limits again, and these are its words
+        ::
+        ++  post-peer-labels
+          ^-  (quip card _this)
+          ?>  ?&  =(%'POST' method)
+                  ?=([%apps %urgit %api %peer %labels ~] site)
+              ==
+          =/  jon=(unit json)  (api-body req)
+          ?~  jon
+            :_  this
+            (api-error eyre-id 400 'valid JSON body required')
+          =/  ship-text=(unit @t)  (string-at 'ship' u.jon)
+          =/  repository=(unit @t)  (string-at 'repository' u.jon)
+          =/  number=(unit @ud)  (nat-at 'number' u.jon)
+          =/  labels=(unit (list @t))  (string-list-at 'labels' u.jon)
+          =/  peer=(unit @p)  ?~(ship-text ~ (slaw %p u.ship-text))
+          ?.  ?&  ?=(^ peer)
+                  ?=(^ repository)
+                  ?=(^ number)
+                  (gth u.number 0)
+                  (valid-repository-name u.repository)
+              ==
+            :_  this
+            (api-error eyre-id 422 'ship, repository and a positive pull request number are required')
+          ?.  ?&  ?=(^ labels)
+                  (lte (lent u.labels) max-labels:ci-forge)
+                  (levy u.labels |=(label=@t ?=(~ (label-error:ci-forge label))))
+              ==
+            :_  this
+            %^  api-error
+              eyre-id
+              422
+            'labels must be an array of at most 20 non-empty strings, each at most 64 bytes'
+          =/  request=@uv
+            `@uv`(shas %git-peer-forge (cat 3 eny.bowl request-count))
+          =.  request-count  +(request-count)
+          =.  peer-forges
+            %+  ~(put by peer-forges)  request
+            :*  u.peer
+                u.repository
+                %pull
+                u.number
+                %.y
+                %.n
+                'sending the labels to the repository owner'
+                ~
+            ==
+          :_  this
+          %+  weld
+            :~  %^  peer-card
+                  u.peer
+                  /peer/forge-labels/(scot %uv request)
+                [%forge-labels request u.repository u.number u.labels]
+                [%pass /peer/forge-timeout/(scot %uv request) %arvo %b %wait (add now.bowl ~s30)]
+            ==
+          %^  api-json
+            eyre-id
+            202
+          (pairs:enjs:format ~[['ok' b+%.y] ['request' s+(scot %uv request)]])
+        ::
+        ::  a writer's approval of an untrusted candidate on another ship's
+        ::  repository (P3 D9): sent over the peer protocol, tracked and read
+        ::  back like a forge comment (GET /peer/forge, kind candidate)
+        ::
+        ++  post-peer-ci-approve
+          ^-  (quip card _this)
+          ?>  ?&  =(%'POST' method)
+                  ?=([%apps %urgit %api %peer %ci-approve ~] site)
+              ==
+          =/  jon=(unit json)  (api-body req)
+          ?~  jon
+            :_  this
+            (api-error eyre-id 400 'valid JSON body required')
+          =/  ship-text=(unit @t)  (string-at 'ship' u.jon)
+          =/  repository=(unit @t)  (string-at 'repository' u.jon)
+          =/  candidate-text=(unit @t)  (string-at 'candidate' u.jon)
+          =/  peer=(unit @p)  ?~(ship-text ~ (slaw %p u.ship-text))
+          =/  candidate=(unit @uv)  ?~(candidate-text ~ (slaw %uv u.candidate-text))
+          ?.  &(?=(^ peer) ?=(^ repository) ?=(^ candidate) (valid-repository-name u.repository))
+            :_  this
+            (api-error eyre-id 422 'ship, repository and a candidate id are required')
+          =/  request=@uv
+            `@uv`(shas %git-peer-forge (cat 3 eny.bowl request-count))
+          =.  request-count  +(request-count)
+          =.  peer-forges
+            %+  ~(put by peer-forges)  request
+            [u.peer u.repository %candidate 0 %.y %.n 'sending the approval to the repository owner' ~]
+          :_  this
+          %+  weld
+            :~  %^  peer-card
+                  u.peer
+                  /peer/ci-approve/(scot %uv request)
+                [%ci-approve request u.repository u.candidate]
+                [%pass /peer/forge-timeout/(scot %uv request) %arvo %b %wait (add now.bowl ~s30)]
+            ==
+          %^  api-json
+            eyre-id
+            202
+          (pairs:enjs:format ~[['ok' b+%.y] ['request' s+(scot %uv request)]])
+        ::
+        ::  a delegate's CI policy action on another ship's repository (P4,
+        ::  rider 02): the operator surface's JSON, carried to the owner over
+        ::  the peer protocol and judged there; tracked and read back like a
+        ::  forge comment (GET /peer/forge, kind policy)
+        ::
+        ++  post-peer-ci-action
+          ^-  (quip card _this)
+          ?>  ?&  =(%'POST' method)
+                  ?=([%apps %urgit %api %peer %ci-action ~] site)
+              ==
+          =/  jon=(unit json)  (api-body req)
+          ?~  jon
+            :_  this
+            (api-error eyre-id 400 'valid JSON body required')
+          =/  ship-text=(unit @t)  (string-at 'ship' u.jon)
+          =/  repository=(unit @t)  (string-at 'repository' u.jon)
+          =/  action=(unit json)
+            ?.  ?=([%o *] u.jon)  ~
+            =/  found=(unit json)  (~(get by p.u.jon) 'action')
+            ?~  found  ~
+            ?.(?=([%o *] u.found) ~ found)
+          =/  peer=(unit @p)  ?~(ship-text ~ (slaw %p u.ship-text))
+          ?.  &(?=(^ peer) ?=(^ repository) ?=(^ action) (valid-repository-name u.repository))
+            :_  this
+            (api-error eyre-id 422 'ship, repository and an action object are required')
+          ::  the body names the repository it is addressed to, once
+          =/  addressed=json
+            ?.  ?=([%o *] u.action)  u.action
+            [%o (~(put by p.u.action) 'repo' s+u.repository)]
+          =/  body=@t  (en:json:html addressed)
+          ?:  (gth (met 3 body) 65.536)
+            :_  this
+            (api-error eyre-id 422 'action is limited to 64 KiB')
+          =/  request=@uv
+            `@uv`(shas %git-peer-forge (cat 3 eny.bowl request-count))
+          =.  request-count  +(request-count)
+          =.  peer-forges
+            %+  ~(put by peer-forges)  request
+            [u.peer u.repository %policy 0 %.y %.n 'sending the request to the repository owner' ~]
+          :_  this
+          %+  weld
+            :~  %^  peer-card
+                  u.peer
+                  /peer/ci-request/(scot %uv request)
+                [%ci-request request u.repository body]
+                [%pass /peer/forge-timeout/(scot %uv request) %arvo %b %wait (add now.bowl ~s30)]
+            ==
+          %^  api-json
+            eyre-id
+            202
+          (pairs:enjs:format ~[['ok' b+%.y] ['request' s+(scot %uv request)]])
         ::
         ++  post-peer-forge
           ^-  (quip card _this)
@@ -4787,8 +6075,27 @@
           ?~  found
             :_  this
             (api-error eyre-id 404 'repository not found')
+          ::  the repository's policy for untrusted revisions, for the settings
+          ::  UI (D6, fence touch 3): %urgit-ci's answer under the same guards
+          ::  the CI gate reads it with, null when it cannot be read
+          ::
+          =/  ci-untrusted-policy=json
+            =/  prefix=path  /(scot %p our.bowl)/urgit-ci/(scot %da now.bowl)
+            =/  live=(each ? tang)
+              %-  mule
+              |.
+              .^(? %gu (weld prefix /$))
+            ?.  &(?=(%& -.live) p.live)  ~
+            =/  raw=(each @tas tang)
+              %-  mule
+              |.
+              ;;(@tas .^(* %gx (weld prefix /policy/(scot %t name)/noun)))
+            ?.  ?=(%& -.raw)  ~
+            s+p.raw
+          =/  jon=json  (repository-json name u.found)
+          ?>  ?=([%o *] jon)
           :_  this
-          (api-json eyre-id 200 (repository-json name u.found))
+          (api-json eyre-id 200 [%o (~(put by p.jon) 'ciUntrustedPolicy' ci-untrusted-policy)])
         ::
         ++  get-repository-files
           ^-  (quip card _this)
@@ -5268,7 +6575,7 @@
           ?~  binding.u.found
             :_  this
             (api-error eyre-id 409 'repository is not bound to a Clay desk')
-          ?:  |(=(^ pending-clay) =(^ pending-publish))
+          ?:  |(!=(~ pending-clay) !=(~ pending-publish))
             :_  this
             (api-error eyre-id 409 'another Clay operation is in progress')
           =/  head-oid=(unit oid:git)
@@ -5419,6 +6726,19 @@
           ?~  snapped
             :_  this
             (api-error eyre-id 422 'file path conflicts with the tree or branch head is invalid')
+          ::  the CI gate (Q4): a CI-protected branch is staged, never written
+          ::
+          =/  gated=(unit (quip card _this))
+            %:  web-edit-ci-gate
+              eyre-id
+              name
+              u.found
+              branch-ref
+              parent
+              commit.u.snapped
+              objects.u.snapped
+            ==
+          ?^  gated  u.gated
           =/  applied=repository:git
             %=  u.found
               objects  objects.u.snapped
@@ -5471,6 +6791,19 @@
           ?~  snapped
             :_  this
             (api-error eyre-id 404 'file not found or branch head is not a valid Git tree')
+          ::  the CI gate (Q4): a CI-protected branch is staged, never written
+          ::
+          =/  gated=(unit (quip card _this))
+            %:  web-edit-ci-gate
+              eyre-id
+              name
+              u.found
+              branch-ref
+              parent
+              commit.u.snapped
+              objects.u.snapped
+            ==
+          ?^  gated  u.gated
           =/  applied=repository:git
             %=  u.found
               objects  objects.u.snapped
@@ -5591,6 +6924,15 @@
           ?~  source
             :_  this
             (api-error eyre-id 404 'branch source not found')
+          ::  the CI gate (Q5): a CI-protected branch is never created here (it
+          ::  has no tip to stage a candidate against); an unreadable %urgit-ci
+          ::  refuses, protected or not
+          ::
+          =/  refusal=(unit [status=@ud message=@t])
+            (ci-write-refusal:hc name ~[[~ `u.source branch-ref]])
+          ?^  refusal
+            :_  this
+            (api-error eyre-id status.u.refusal message.u.refusal)
           (api-with-action eyre-id 201 [%set-ref name branch-ref u.source])
         ::
         ++  delete-repository-branches
@@ -5624,6 +6966,15 @@
           ?:  &(?=(^ binding.u.found) =(branch-ref branch.u.binding.u.found))
             :_  this
             (api-error eyre-id 409 'cannot delete a branch linked to a Clay desk')
+          ::  the CI gate (Q5): a CI-protected branch is never deleted, so it
+          ::  cannot be deleted and re-created around CI; an unreadable
+          ::  %urgit-ci refuses, protected or not
+          ::
+          =/  refusal=(unit [status=@ud message=@t])
+            (ci-write-refusal:hc name ~[[(~(get by refs.u.found) branch-ref) ~ branch-ref]])
+          ?^  refusal
+            :_  this
+            (api-error eyre-id status.u.refusal message.u.refusal)
           (api-with-action eyre-id 200 [%delete-ref name branch-ref])
         ::
         ++  post-repository-branches-default
@@ -5959,6 +7310,15 @@
               objects  objects.u.tagged
               refs  (~(put by refs.repo.u.prepared) tag-ref tag.u.tagged)
             ==
+          ::  the CI gate (Q5): a tag can be CI-protected, and a CI-protected tag
+          ::  is never created here (it has no tip to stage a candidate against);
+          ::  an unreadable %urgit-ci refuses, protected or not
+          ::
+          =/  refusal=(unit [status=@ud message=@t])
+            (ci-write-refusal:hc name ~[[~ (~(get by refs.applied) tag-ref) tag-ref]])
+          ?^  refusal
+            :_  this
+            (api-error eyre-id status.u.refusal message.u.refusal)
           =.  repositories  (~(put by repositories) name applied)
           =/  tag-oid=oid:git  (need (~(get by refs.applied) tag-ref))
           =/  event-data=json
@@ -6003,6 +7363,14 @@
           ?:  (~(has by releases.u.found) u.tag-name)
             :_  this
             (api-error eyre-id 409 'delete the release before deleting its tag')
+          ::  the CI gate (Q5): a CI-protected tag is never deleted; an
+          ::  unreadable %urgit-ci refuses, protected or not
+          ::
+          =/  refusal=(unit [status=@ud message=@t])
+            (ci-write-refusal:hc name ~[[(~(get by refs.u.found) tag-ref) ~ tag-ref]])
+          ?^  refusal
+            :_  this
+            (api-error eyre-id status.u.refusal message.u.refusal)
           =.  repositories
             %+  ~(put by repositories)
               name
@@ -6200,7 +7568,7 @@
           ?~  binding.u.found
             :_  this
             (api-error eyre-id 409 'repository is not bound to a Clay desk')
-          ?:  |(=(^ pending-clay) =(^ pending-publish))
+          ?:  |(!=(~ pending-clay) !=(~ pending-publish))
             :_  this
             (api-error eyre-id 409 'another Clay operation is in progress')
           =/  jon=(unit json)  (api-body req)
@@ -6211,7 +7579,32 @@
           ?.  &(?=(^ message) !=('' u.message))
             :_  this
             (api-error eyre-id 422 'non-empty message is required')
-          (api-with-action eyre-id 202 [%publish-desk name u.message])
+          ::  the CI gate (Q5): a publication advances the bound branch.  a
+          ::  CI-protected branch is staged once the desk has been read (the
+          ::  completion asks again, in the event that writes), and the answer
+          ::  says so; an unreadable %urgit-ci refuses now, and a protected
+          ::  branch with no tip has nothing to stage a candidate against
+          ::
+          =/  branch=@t  branch.u.binding.u.found
+          =/  protected=(each ? @t)  (ci-ref-protected:hc name branch)
+          ?.  ?=(%& -.protected)
+            :_  this
+            (api-error eyre-id 503 p.protected)
+          ?:  &(p.protected =(~ (~(get by refs.u.found) branch)))
+            :_  this
+            %^  api-error
+              eyre-id
+              409
+            (rap 3 ~['ci-protected ref has no tip to stage a candidate against: ' branch])
+          =/  [cards=(list card) next=_this]  (handle-action [%publish-desk name u.message])
+          :_  next
+          %+  weld  cards
+          %^  api-json  eyre-id  202
+          %-  pairs:enjs:format
+          :~  ['ok' b+%.y]
+              ['staged' b+p.protected]
+              ['ref' s+branch]
+          ==
         --
       ::
       ++  repository-pulls-api
@@ -6225,6 +7618,49 @@
             post-repository-pulls-comments-resolve
             [%'POST' %repository @ %pulls @ %state ~]  post-repository-pulls-state
             [%'POST' %repository @ %pulls @ %merge ~]  post-repository-pulls-merge
+            [%'POST' %repository @ %pulls @ %labels ~]  post-repository-pulls-labels
+          ==
+        ::
+        ::  a pull request's labels (state-5), replaced whole as an issue's
+        ::  are.  the session is this ship, the owner.  +label-edit:ci-forge
+        ::  decides, as it does for a writer's peer request.  a closed or
+        ::  merged pull request takes labels too: %urgit-ci records the
+        ::  change and runs nothing
+        ::
+        ++  post-repository-pulls-labels
+          ^-  (quip card _this)
+          ?>  ?&  =(%'POST' method)
+                  ?=([%apps %urgit %api %repository @ %pulls @ %labels ~] site)
+              ==
+          =/  name=@t  i.t.t.t.t.site
+          =/  number=(unit @ud)  (slaw %ud i.t.t.t.t.t.t.site)
+          ?~  number
+            :_  this
+            (api-error eyre-id 422 'pull request number is invalid')
+          =/  found=(unit repository:git)  (~(get by repositories) name)
+          ?~  found
+            :_  this
+            (api-error eyre-id 404 'repository not found')
+          =/  jon=(unit json)  (api-body req)
+          ?~  jon
+            :_  this
+            (api-error eyre-id 400 'valid JSON body required')
+          =/  edit=(each (set @t) [status=@ud message=@t])
+            %:  label-edit:ci-forge
+              (repository-writable u.found our.bowl)
+              (native-pull-at u.found u.number)
+              (string-list-at 'labels' u.jon)
+            ==
+          ?:  ?=(%| -.edit)
+            :_  this
+            (api-error eyre-id status.p.edit message.p.edit)
+          =.  repositories
+            (~(put by repositories) name (with-pull-labels:ci-forge u.found u.number p.edit))
+          :_  this
+          %^  api-json  eyre-id  200
+          %-  pairs:enjs:format
+          :~  ['ok' b+%.y]
+              ['labels' [%a (turn (sorted-labels:ci-forge p.edit) |=(label=@t s+label))]]
           ==
         ::
         ++  post-repository-pulls
@@ -6272,7 +7708,7 @@
             (api-error eyre-id 409 'selected branches have identical tips')
           =/  number=@ud  (add 1 (lent native-pulls.u.found))
           =/  pull=native-pull:git
-            [number our.bowl name u.source-ref u.target-ref u.title %open u.incoming u.base ~]
+            [number our.bowl name u.source-ref u.target-ref u.title %open u.incoming u.base ~ ~]
           =.  repositories
             (~(put by repositories) name u.found(native-pulls [pull native-pulls.u.found]))
           =/  event-data=json
@@ -6314,8 +7750,13 @@
           ?~  detail
             :_  this
             (api-error eyre-id 409 'pull request objects are incomplete')
+          ::  whether this viewer may change the labels: the session is the
+          ::  owner, asked through the rule the labels route applies
+          =/  shown=json
+            ?.  ?=([%o *] u.detail)  u.detail
+            [%o (~(put by p.u.detail) 'labelsEditable' b+(repository-writable u.found our.bowl))]
           :_  this
-          (api-json eyre-id 200 u.detail)
+          (api-json eyre-id 200 shown)
         ::
         ++  post-repository-pulls-comments
           ^-  (quip card _this)
@@ -6509,6 +7950,57 @@
           ?~  current
             :_  this
             (api-error eyre-id 409 'destination branch has no head')
+          ::  the CI gate (D3a): a CI-protected target is never written here.
+          ::  the pull's head is staged as a candidate against the current tip
+          ::  with the pull's author as the actor, trusted when that ship can
+          ::  write this repository, and the pull stays open until the
+          ::  candidate lands (land-candidate flips it).  %urgit-ci is read as
+          ::  ci-gate-error reads it: liveness first, then membership, both
+          ::  under mule; an unreadable answer refuses, protected or not, as
+          ::  the push path does.
+          ::
+          =/  ci-prefix=path  /(scot %p our.bowl)/urgit-ci/(scot %da now.bowl)
+          =/  ci-live=(each ? tang)
+            %-  mule
+            |.
+            .^(? %gu (weld ci-prefix /$))
+          ?.  &(?=(%& -.ci-live) p.ci-live)
+            :_  this
+            %^  api-error
+              eyre-id
+              503
+            'ci: %urgit-ci is not running; protected-ref writes are refused until it is'
+          =/  ci-protected=(each ? tang)
+            %-  mule
+            |.
+            ;;(? .^(* %gx (weld ci-prefix /ci-protected/(scot %t name)/(scot %t target-ref.pull)/noun)))
+          ?.  ?=(%& -.ci-protected)
+            :_  this
+            (api-error eyre-id 503 'ci: protection could not be read; the merge is refused')
+          ?:  p.ci-protected
+            =/  =trust:ci
+              ?:((repository-writable u.found source-ship.pull) %trusted %untrusted)
+            ::  the class %urgit-ci will find through the ci-can-write peek —
+            ::  the same rule, so the id it will give the candidate is known
+            ::  here (its rule: the trusted id is the head and base alone, the
+            ::  untrusted one adds the class)
+            ::
+            =/  id=@uv
+              ?:  =(%trusted trust)  (sham [name target-ref.pull head.pull u.current])
+              (sham [name target-ref.pull head.pull u.current %untrusted])
+            :_  this
+            :-  :*  %pass  /ci/stage/(scot %uv id)
+                    %agent  [our.bowl %urgit-ci]  %poke  %ci-action
+                    !>(`action:ci`[%stage-candidate name target-ref.pull head.pull u.current source-ship.pull %session `number.pull])
+                ==
+            %^  api-json  eyre-id  202
+            %-  pairs:enjs:format
+            :~  ['ok' b+%.y]
+                ['staged' b+%.y]
+                ['candidate' s+(scot %uv id)]
+                ['trust' s+trust]
+                ['actor' s+(scot %p source-ship.pull)]
+            ==
           =/  incoming-reachable=(unit (set oid:git))
             (reachable:git-graph objects.u.found (silt ~[head.pull]))
           =/  current-reachable=(unit (set oid:git))
@@ -6567,7 +8059,7 @@
                 200
               (pairs:enjs:format ~[['ok' b+%.y] ['commit' s+(oid-text:git-codec merge-oid)]])
             ?>  ?=(^ binding.applied)
-            ?:  |(=(^ pending-clay) =(^ pending-publish))
+            ?:  |(!=(~ pending-clay) !=(~ pending-publish))
               :_  this
               (api-error eyre-id 409 'another Clay operation is in progress')
             =/  files=(unit (map path octs))
@@ -6765,6 +8257,31 @@
       :_  this
       (give-text eyre-id 404 'repository route not found\0a')
     ::
+    ::  a CI read capability on /git (P4 A06): the Basic password is an
+    ::  attempt-bound token %urgit-ci issued for exactly the repositories its
+    ::  bundle needs, until the attempt's deadline; %urgit-ci is asked by the
+    ::  token's hash, under the same guards every other CI read uses.  a
+    ::  capability grants reads only; writes still need a writer.
+    ::
+    ++  ci-read-authorized
+      |=  [repo-name=@t req=inbound-request:eyre]
+      ^-  ?
+      =/  token=(unit @t)  (basic-password req)
+      ?~  token  %.n
+      =/  cap=(unit @uv)  (slaw %uv u.token)
+      ?~  cap  %.n
+      =/  prefix=path  /(scot %p our.bowl)/urgit-ci/(scot %da now.bowl)
+      =/  live=(each ? tang)
+        %-  mule
+        |.
+        .^(? %gu (weld prefix /$))
+      ?.  &(?=(%& -.live) p.live)  %.n
+      =/  answer=(each ? tang)
+        %-  mule
+        |.
+        ;;(? .^(* %gx (weld prefix /ci-read/(scot %t repo-name)/(scot %uv (shas %ci-read-hash u.cap))/noun)))
+      &(?=(%& -.answer) p.answer)
+    ::
     ++  handle-discovery
       |=  [eyre-id=@ta req=inbound-request:eyre line=request-line:server repo-name=@t]
       ^-  (quip card _this)
@@ -6786,7 +8303,7 @@
         (give-text eyre-id 403 'service disabled\0a')
       =/  authorized=?
         ?:  =('git-upload-pack' u.service)
-          |(public-read.u.found authenticated.req (write-authorized u.found req))
+          |(public-read.u.found authenticated.req (write-authorized u.found req) (ci-read-authorized repo-name req))
         (write-authorized u.found req)
       ?.  authorized
         :_  this
@@ -6827,7 +8344,7 @@
       ?~  found
         :_  this
         (give-text eyre-id 404 'repository not found\0a')
-      ?.  |(public-read.u.found authenticated.req (write-authorized u.found req))
+      ?.  |(public-read.u.found authenticated.req (write-authorized u.found req) (ci-read-authorized repo-name req))
         :_  this
         (give-text eyre-id 403 'repository is private\0a')
       ?~  body.request.req
@@ -6988,6 +8505,56 @@
           %+  receive-payload
             'invalid or unsupported pack'
           (receive-results commands.u.parsed %.n 'unpack failed')
+        ::  the CI gate runs before the branch rules: a divergent push to a
+        ::  CI-protected ref is staged as a candidate, never refused as a
+        ::  non-fast-forward.  when a push is staged, the pushed objects stay
+        ::  in the store, the ref does not move, and %urgit-ci is told.
+        ::
+        =/  gate=push-gate  (ci-gate-error repo-name u.found commands.u.parsed)
+        ?:  ?=(%refuse -.gate)
+          :_  this
+          %+  give-simple-payload:app:server  eyre-id
+          (receive-payload 'ok' (receive-results commands.u.parsed %.n message.gate))
+        ?:  ?=(%stage -.gate)
+          =.  repositories
+            %+  ~(put by repositories)
+              repo-name
+            u.found(objects (merge-objects objects.u.found u.staged))
+          =/  id=@uv  (sham [repo-name ref.gate head.gate base.gate])
+          ::  the pusher, for step 5's trust classification (CI-TRUST-P1): the
+          ::  ship's own session, or the owner by delegation through the
+          ::  write token, since write-authorized admits nothing else
+          ::
+          ::  both are writers (write-authorized admitted the push), which
+          ::  %urgit-ci confirms through ci-can-write (D3); a push stages no
+          ::  pull request (fence touch 4: the pull slot is ~)
+          ::
+          =/  actor=[@p via:ci]
+            ?:(authenticated.req [our.bowl %session] [owner.u.found %token])
+          :_  this
+          :-  :*  %pass  /ci/stage/(scot %uv id)
+                  %agent  [our.bowl %urgit-ci]  %poke  %ci-action
+                  !>(`action:ci`[%stage-candidate repo-name ref.gate head.gate base.gate -.actor +.actor ~])
+              ==
+          %+  give-simple-payload:app:server  eyre-id
+          (receive-payload 'ok' (receive-results commands.u.parsed %.n message.gate))
+        ::  a CI-protected advance a live authority names (Q5): the pushed
+        ::  objects join the store (the landing's object may have come in this
+        ::  very push), the branch rules still hold, and the landing path lands
+        ::  it and answers the push, in this event or from its parked Clay
+        ::  completion
+        ::
+        ?:  ?=(%land -.gate)
+          =/  policy=(unit @t)  (receive-policy-error u.found commands.u.parsed u.staged)
+          ?^  policy
+            :_  this
+            %+  give-simple-payload:app:server  eyre-id
+            (receive-payload 'ok' (receive-results commands.u.parsed %.n u.policy))
+          =.  repositories
+            %+  ~(put by repositories)
+              repo-name
+            u.found(objects (merge-objects objects.u.found u.staged))
+          (land-through id.gate repo-name ref.gate new.gate old.gate pull.gate `eyre-id)
         =/  policy-error=(unit @t)
           (receive-policy-error u.found commands.u.parsed u.staged)
         ?^  policy-error
@@ -7011,7 +8578,7 @@
           =/  linked-command=(unit receive-command:git)
             (command-for-ref commands.u.parsed branch.u.binding.u.applied)
           ?~  linked-command
-            (accept-receive eyre-id repo-name commands.u.parsed u.applied ~)
+            (accept-receive `eyre-id repo-name commands.u.parsed u.applied ~)
           =/  maybe-pending=(unit clay-push)  pending-clay
           ?^  maybe-pending
             :_  this
@@ -7054,7 +8621,7 @@
           ?:  =(~ p.u.delta)
             =/  clay=[desk-name=desk commit=oid:git]
               [desk-name.u.binding.u.applied u.new.u.linked-command]
-            (accept-receive eyre-id repo-name commands.u.parsed u.applied `clay)
+            (accept-receive `eyre-id repo-name commands.u.parsed u.applied `clay)
           =/  pending=clay-push
             =/  start-at=@da  (add now.bowl ~s1)
             =/  timeout-at=@da  (add now.bowl ~s15)
@@ -7078,7 +8645,7 @@
               [%pass /clay-timeout %arvo %b %wait timeout-at.pending]
           ==
         ++  accept-unlinked-ref
-          (accept-receive eyre-id repo-name commands.u.parsed u.applied ~)
+          (accept-receive `eyre-id repo-name commands.u.parsed u.applied ~)
         --
       ::
       --
@@ -7456,7 +9023,28 @@
   =/  after=peer-ui-state
     =>  +.result
     [peer-activities notification-activities peer-results peer-receiving peer-outgoing]
-  [(peer-ui-notify before after -.result) +.result]
+  ::  what this event persisted goes to %urgit-ci after its own cards
+  ::  (Delivery 1C)
+  ::  a local pull request's head follows its source branch (Delivery 1C,
+  ::  lib/ci-forge follow-source-branches), in the event that moved it
+  =/  synced=_this
+    =/  next=_this  +.result
+    next(repositories (follow-source-branches:ci-forge repos-before =>(next repositories) our.bowl))
+  =/  forge=(list card)
+    =/  who=[actor=@p route=@t]
+      (poke-attribution:hc mark vase repos-before receiving.before)
+    (forge-cards:hc repos-before =>(synced repositories) actor.who route.who)
+  ::  CI-RECOVERY-1: the replica pushes that ended in this event, answered
+  ::  to %urgit-ci
+  =/  told=[cards=(list card) pushes=(map @uv recovery-push)]
+    %:  recovery-told:hc
+      =>(synced recovery-pushes)
+      =>(synced github-results)
+      =>(synced peer-outgoing)
+      =>(synced peer-results)
+    ==
+  :-  :(weld (peer-ui-notify before after -.result) forge cards.told)
+  synced(recovery-pushes pushes.told)
 ::
 ++  on-peek
   |=  =path
@@ -7480,6 +9068,190 @@
       ?~  found  [~ ~]
       ?.  public-read.u.found  [~ ~]
       ``json+!>((public-repository-json name u.found))
+      ::
+      ::  the three reads %urgit-ci makes of a repository, private or not:
+      ::  a file at a commit, the entries under a directory at a commit,
+      ::  and a ref's tip.  segments are (scot %t ...)-encoded so a 40-hex
+      ::  oid, a dotted file name or a slashed path fits one segment.  a
+      ::  local %x read is the only way to reach them; nothing remote can.
+      ::  each answers a unit, never [~ ~], so the reading event survives.
+      ::
+        [%x %ci-file @ @ @ ~]
+      =/  name=@t  (ci-segment i.t.t.path)
+      =/  oid=(unit oid:git)  (ci-oid (ci-segment i.t.t.t.path))
+      =/  file-path=(list @ta)  (ci-path (ci-segment i.t.t.t.t.path))
+      =/  found=(unit repository:git)  (~(get by repositories) name)
+      :^  ~  ~  %noun
+      !>  ^-  (unit octs)
+          ?~  found  ~
+          ?~  oid  ~
+          (file-at-commit u.found u.oid file-path)
+        [%x %ci-tree @ @ @ ~]
+      =/  name=@t  (ci-segment i.t.t.path)
+      =/  oid=(unit oid:git)  (ci-oid (ci-segment i.t.t.t.path))
+      =/  under=(list @ta)  (ci-path (ci-segment i.t.t.t.t.path))
+      =/  found=(unit repository:git)  (~(get by repositories) name)
+      :^  ~  ~  %noun
+      !>  ^-  (unit (list (list @ta)))
+          ?~  found  ~
+          ?~  oid  ~
+          =/  files=(unit (map (list @ta) octs))
+            (flatten-commit:git-tree objects.u.found u.oid)
+          ?~  files  ~
+          :-  ~
+          %+  murn  ~(tap in ~(key by u.files))
+          |=  file-path=(list @ta)
+          ^-  (unit (list @ta))
+          =/  depth=@ud  (lent under)
+          ?.  =(under (scag depth file-path))  ~
+          `(slag depth file-path)
+      ::
+      ::  the tip and whether the repository is bound to a Clay desk: a
+      ::  linked repository cannot be CI-protected or landed in this
+      ::  release (CI-LINKED-DESK-P1)
+      ::
+        [%x %ci-ref @ @ ~]
+      =/  name=@t  (ci-segment i.t.t.path)
+      =/  ref=@t  (ci-segment i.t.t.t.path)
+      =/  found=(unit repository:git)  (~(get by repositories) name)
+      :^  ~  ~  %noun
+      !>  ^-  (unit [tip=oid:git linked=?])
+          ?~  found  ~
+          =/  tip=(unit oid:git)  (~(get by refs.u.found) ref)
+          ?~  tip  ~
+          `[u.tip ?=(^ binding.u.found)]
+      ::
+      ::  whether a ship can write a repository (D3, fence touch 5): the
+      ::  rule repository-writable applies — owner, listed writer, or a
+      ::  %write group seat — for a public or private repository; %.n for
+      ::  a repository this ship does not hold.  %urgit-ci reads it for the
+      ::  trust class at staging and for approval.
+      ::
+        [%x %ci-can-write @ @ ~]
+      =/  name=@t  (ci-segment i.t.t.path)
+      =/  actor=(unit @p)  (slaw %p i.t.t.t.path)
+      =/  found=(unit repository:git)  (~(get by repositories) name)
+      :^  ~  ~  %noun
+      !>  ^-  ?
+          ?~  found  %.n
+          ?~  actor  %.n
+          (repository-writable:hc u.found u.actor)
+      ::
+      ::  the repository's owner as the forge knows it (P4, rider 02):
+      ::  %urgit-ci derives every implicit CI authority from this, never
+      ::  from an actor a request supplied
+      ::
+        [%x %ci-owner @ ~]
+      =/  name=@t  (ci-segment i.t.t.path)
+      =/  found=(unit repository:git)  (~(get by repositories) name)
+      :^  ~  ~  %noun
+      !>  ^-  (unit @p)
+          ?~  found  ~
+          `owner.u.found
+      ::
+      ::  %urgit-ci's reads for automatic events (Delivery 1C): a
+      ::  repository's default branch; the changed paths of a push and of a
+      ::  pull request, from this ship's own objects (lib/ci-changes, bounded,
+      ::  an unavailable answer with its reason, never the capped browser
+      ::  diff); and a native pull request's record.  each answers a unit,
+      ::  never [~ ~]
+      ::
+        [%x %ci-head @ ~]
+      =/  name=@t  (ci-segment i.t.t.path)
+      =/  found=(unit repository:git)  (~(get by repositories) name)
+      :^  ~  ~  %noun
+      !>  ^-  (unit @t)
+          ?~  found  ~
+          `head.u.found
+    ::
+        ::  CI-RECOVERY-1: the checkpoint repository as %urgit-ci reads it.
+        ::  it says whether the repository is public or bound to a desk.  it
+        ::  gives the default branch, its tip and the replica path.  ~ when
+        ::  the repository does not exist, never [~ ~].  the GitHub token is
+        ::  never answered, only whether one is stored
+        ::
+        [%x %ci-recovery-repo @ ~]
+      =/  name=@t  (ci-segment i.t.t.path)
+      =/  found=(unit repository:git)  (~(get by repositories) name)
+      :^  ~  ~  %noun
+      !>  ^-  (unit recovery-repo:ci)
+          ?~  found  ~
+          =/  github=(unit [owner=@t repository=@t])
+            ?~  github-origin.u.found  ~
+            `[owner.u.github-origin.u.found repository.u.github-origin.u.found]
+          =/  peer=(unit [ship=@p repository=@t])
+            ?~  peer-origin.u.found  ~
+            `[ship.u.peer-origin.u.found repository.u.peer-origin.u.found]
+          :-  ~
+          :*  public-read.u.found
+              head.u.found
+              (~(get by refs.u.found) head.u.found)
+              ?=(^ binding.u.found)
+              github
+              peer
+              ?=(^ github-token)
+          ==
+    ::
+        [%x %ci-tag-commit @ @ ~]
+      =/  name=@t  (ci-segment i.t.t.path)
+      =/  object=(unit oid:git)  (ci-oid (ci-segment i.t.t.t.path))
+      =/  found=(unit repository:git)  (~(get by repositories) name)
+      :^  ~  ~  %noun
+      !>  ^-  (unit (each oid:git @t))
+          ?~  found  ~
+          ?~  object  `[%| 'the tag target is not an object id']
+          `(commit-at:ci-changes objects.u.found u.object)
+    ::
+        [%x %ci-push-changes @ @ @ @ ~]
+      =/  name=@t  (ci-segment i.t.t.path)
+      =/  ref=@t  (ci-segment i.t.t.t.path)
+      =/  old-text=@t  (ci-segment i.t.t.t.t.path)
+      =/  new=(unit oid:git)  (ci-oid (ci-segment i.t.t.t.t.t.path))
+      =/  found=(unit repository:git)  (~(get by repositories) name)
+      :^  ~  ~  %noun
+      !>  ^-  (unit (each (list @t) @t))
+          ?~  found  ~
+          ?~  new  `[%| 'the new tip is not an object id']
+          =/  old=(unit oid:git)  ?:(=('' old-text) ~ (ci-oid old-text))
+          ?:  ?&(!=('' old-text) ?=(~ old))  `[%| 'the old tip is not an object id']
+          ::  every other branch and tag, scratch refs aside: what a new
+          ::  ref's commits are told apart from
+          =/  others=(list oid:git)
+            %+  murn  ~(tap by refs.u.found)
+            |=  [r=@t o=oid:git]
+            ^-  (unit oid:git)
+            ?:  =(r ref)  ~
+            ?.  ?|(=('refs/heads/' (end [3 11] r)) =('refs/tags/' (end [3 10] r)))  ~
+            `o
+          `(push-changes:ci-changes objects.u.found old u.new others)
+    ::
+        [%x %ci-pull-changes @ @ @ ~]
+      =/  name=@t  (ci-segment i.t.t.path)
+      =/  head=(unit oid:git)  (ci-oid (ci-segment i.t.t.t.path))
+      =/  target=(unit oid:git)  (ci-oid (ci-segment i.t.t.t.t.path))
+      =/  found=(unit repository:git)  (~(get by repositories) name)
+      :^  ~  ~  %noun
+      !>  ^-  (unit (each (list @t) @t))
+          ?~  found  ~
+          ?.  ?&(?=(^ head) ?=(^ target))  `[%| 'the head or target is not an object id']
+          `(pull-changes:ci-changes objects.u.found u.head u.target)
+    ::
+        [%x %ci-pull @ @ ~]
+      =/  name=@t  (ci-segment i.t.t.path)
+      =/  number=(unit @ud)  (slaw %ud i.t.t.t.path)
+      =/  found=(unit repository:git)  (~(get by repositories) name)
+      :^  ~  ~  %noun
+      !>  ^-  (unit native-pull:git)
+          ?~  found  ~
+          ?~  number  ~
+          (native-pull-at u.found u.number)
+      ::
+      ::  whether a repository exists (P4: %urgit-ci creates mirror
+      ::  repositories for an import and must not create one twice)
+      ::
+        [%x %ci-exists @ ~]
+      =/  name=@t  (ci-segment i.t.t.path)
+      ``noun+!>((~(has by repositories) name))
         [%x %repository @ %files ~]
       =/  name=@t  i.t.t.path
       =/  found=(unit repository:git)  (~(get by repositories) name)
@@ -7571,7 +9343,28 @@
   ^-  (quip card _this)
   =/  before=peer-ui-state
     [peer-activities notification-activities peer-results peer-receiving peer-outgoing]
+  =/  repos-before=(map @t repository:git)  repositories
   =/  result=(quip card _this)
+    ::  the answer to a writer's cross-ship approval (P3 D9): %urgit-ci's
+    ::  ack lands it, its nack carries the refusal's own words
+    ::
+    ?:  ?=([%ci ?(%approve %request) @ @ @ ~] wire)
+      ?.  ?=(%poke-ack -.sign)  `this
+      =/  policy=?  =(%request i.t.wire)
+      =/  request=(unit @uv)  (slaw %uv i.t.t.wire)
+      =/  requester=(unit @p)  (slaw %p i.t.t.t.wire)
+      =/  repository=@t  (fall (slaw %t i.t.t.t.t.wire) i.t.t.t.t.wire)
+      ?:  |(?=(~ request) ?=(~ requester))  `this
+      =/  answer=[ok=? message=@t]
+        ?~  p.sign
+          ?:  policy  [%.y 'policy action applied']
+          [%.y 'candidate approved; the same head runs again as trusted']
+        =/  detail=@t  (refusal-text u.p.sign)
+        [%.n ?:(=('' detail) ?:(policy 'request refused' 'approval refused') detail)]
+      =/  packet=packet:git-peer
+        [%forge-result u.request repository ?:(policy %policy %candidate) 0 ok.answer message.answer ~]
+      :_  this
+      ~[[%pass /peer/forge-result/(scot %uv u.request) %agent [u.requester %urgit] %poke %git-peer !>(packet)]]
     ::  the ack of a catalog request settles the ledger: the ship is back,
     ::  so it may be asked again.  a nack means the ship does not run
     ::  urgit, and settles the discovery now rather than at the timer
@@ -7617,12 +9410,24 @@
   =/  after=peer-ui-state
     =>  +.result
     [peer-activities notification-activities peer-results peer-receiving peer-outgoing]
-  [(peer-ui-notify before after -.result) +.result]
+  ::  a local pull request's head follows its source branch (Delivery 1C,
+  ::  lib/ci-forge follow-source-branches), in the event that moved it
+  =/  synced=_this
+    =/  next=_this  +.result
+    next(repositories (follow-source-branches:ci-forge repos-before =>(next repositories) our.bowl))
+  =/  forge=(list card)
+    =/  route=@t  (rap 3 ~['agent ' ?~(wire '' i.wire)])
+    (forge-cards:hc repos-before =>(synced repositories) our.bowl route)
+  [(weld (peer-ui-notify before after -.result) forge) synced]
 ++  on-arvo
   |=  [=wire =sign-arvo]
   ^-  (quip card _this)
   =/  before=peer-ui-state
     [peer-activities notification-activities peer-results peer-receiving peer-outgoing]
+  =/  repos-before=(map @t repository:git)  repositories
+  ::  the Clay write parked when this event began: its completion is that
+  ::  write's (Delivery 1C attribution)
+  =/  parked=(unit clay-push)  pending-clay
   =/  result=(quip card _this)
     =/  error-cards
       |=  [eyre-id=@ta status=@ud message=@t]
@@ -8251,6 +10056,24 @@
       =/  published=(unit repository:git)
         (publish-repository u.current next-job our.bowl now.bowl)
       ?~  published  `this(pending-publish ~)
+      ::  the CI gate (Q5), in the event that writes: a publication advances
+      ::  the bound branch, so a CI-protected one is staged, never written.
+      ::  the snapshot commit (parented on the branch's current tip) and its
+      ::  objects are kept, the branch and its Clay links stay where they
+      ::  are, and the commit is staged against that tip with this ship as
+      ::  the actor.  a refusal (an unreadable %urgit-ci, a protected branch
+      ::  with no tip) writes nothing
+      ::
+      =/  gate=ci-write
+        %+  ci-write-verdict:hc  repository.next-job
+        ~[[(~(get by refs.u.current) branch.next-job) (~(get by refs.u.published) branch.next-job) branch.next-job]]
+      ?:  ?=(%refuse -.gate)  `this(pending-publish ~)
+      ?:  ?=(%stage -.gate)
+        =/  staged=[text=@t cards=(list card)]
+          (ci-stages:hc repository.next-job u.current stages.gate our.bowl %session)
+        =.  repositories
+          (~(put by repositories) repository.next-job u.current(objects objects.u.published))
+        [cards.staged this(pending-publish ~)]
       =.  repositories  (~(put by repositories) repository.next-job u.published)
       `this(pending-publish ~)
     ::
@@ -8295,7 +10118,7 @@
       ?~  maybe-pending  `this
       =/  pending=clay-push  u.maybe-pending
       ?^  error.sign-arvo
-        `this(pending-clay ~)
+        `this(pending-clay ~, pending-ci-land ~)
       =/  report-at=@da  (add now.bowl ~s1)
       =.  pending  pending(result `[%.n 'Clay update timed out without a result'])
       =.  pending-clay  `pending
@@ -8311,19 +10134,134 @@
       =/  maybe-pending=(unit clay-push)  pending-clay
       ?~  maybe-pending  `this
       =/  pending=clay-push  u.maybe-pending
+      ::  a report with nothing to report (a timer error, no result) ends the
+      ::  clay-push; a CI landing parked on it is refused with the reason
+      ::  rather than left passed and unlanded with none (P3 D9)
+      ::
+      =/  dropped
+        |=  reason=@t
+        ^-  (quip card _this)
+        =/  ci-land  pending-ci-land
+        =.  pending-clay  ~
+        =.  pending-ci-land  ~
+        ?~  ci-land  `this
+        :_  this
+        :-  :*  %pass  /ci/land  %agent  [our.bowl %urgit-ci]  %poke  %ci-action
+                !>(`action:ci`[%land-refused id.u.ci-land reason])
+            ==
+        ::  a parked push landing (Q5) hears the refusal as its ng
+        ::
+        ?:  =('' eyre-id.pending)  ~
+        %+  give-simple-payload:app:server  eyre-id.pending
+        (receive-payload 'ok' (receive-results commands.pending %.n reason))
       ?^  error.sign-arvo
-        `this(pending-clay ~)
+        (dropped 'Clay update was not reported; re-run the candidate to land it')
       =/  maybe-result=(unit [ok=? message=@t])  result.pending
       ?~  maybe-result
-        `this(pending-clay ~)
+        (dropped 'Clay update ended without a result; re-run the candidate to land it')
       =/  result=[ok=? message=@t]  u.maybe-result
+      ::  a CI landing (P3 D9): the desk is written; the ref advances only if
+      ::  the candidate is still eligible and the destination has not moved
+      ::  since the landing was parked — the same checks as a plain landing,
+      ::  made in the event that writes.  %urgit-ci hears %landed or
+      ::  %land-refused; no request is answered.
+      ::
+      =/  ci-land  pending-ci-land
+      ?^  ci-land
+        =/  land  u.ci-land
+        =.  pending-clay  ~
+        =.  pending-ci-land  ~
+        =/  reply
+          |=  reason=(unit @t)
+          ^-  (list card)
+          :-  :*  %pass  /ci/land  %agent  [our.bowl %urgit-ci]  %poke  %ci-action
+                  !>(`action:ci`?~(reason [%landed id.land] [%land-refused id.land u.reason]))
+              ==
+          ::  a parked push landing (Q5) is answered here: ok, or the
+          ::  refusal as its ng
+          ::
+          ?:  =('' eyre-id.pending)  ~
+          %+  give-simple-payload:app:server  eyre-id.pending
+          (receive-payload 'ok' (receive-results commands.pending ?=(~ reason) (fall reason '')))
+        ?.  ok.result
+          :_  this  (reply `message.result)
+        =/  current=(unit repository:git)  (~(get by repositories) repository.pending)
+        ?~  current
+          :_  this  (reply `'repository not found')
+        ?.  =(`expected.land (~(get by refs.u.current) branch.pending))
+          :_  this  (reply `'destination moved; rebase and push again')
+        =/  prefix=path  /(scot %p our.bowl)/urgit-ci/(scot %da now.bowl)
+        =/  live=(each ? tang)
+          %-  mule
+          |.
+          .^(? %gu (weld prefix /$))
+        ?.  &(?=(%& -.live) p.live)
+          :_  this  (reply `'ci: %urgit-ci is not running; the candidate cannot be landed')
+        ::  P4: the same predicate the synchronous path consumed, re-read
+        ::  in the event that writes the ref (an override that expired or
+        ::  was used meanwhile, a generation that moved, refuse here)
+        =/  eligible=(each ? tang)
+          %-  mule
+          |.
+          ;;(? .^(* %gx (weld prefix /eligible-at/(scot %t repository.pending)/(scot %t branch.pending)/(scot %t (oid-text:git-codec new-oid.pending))/(scot %t (oid-text:git-codec expected.land))/noun)))
+        ?.  &(?=(%& -.eligible) p.eligible)
+          :_  this  (reply `'candidate is not eligible to land')
+        ::  Q5: the object contains the tip it replaces, checked again in the
+        ::  event that moves the ref, over the objects parked with it
+        ::
+        ?.  (commit-contains objects.applied.pending new-oid.pending expected.land)
+          :_  this
+          %-  reply
+          `'candidate does not contain the destination tip; rebuild it against the current tip'
+        =/  clay-revision=(unit @ud)
+          %-  mole
+          |.(ud:.^(cass:clay %cw /(scot %p our.bowl)/[desk-name.pending]/(scot %da now.bowl)))
+        =/  applied=repository:git
+          %:  update-binding-success
+            (land-onto-current u.current applied.pending branch.pending new-oid.pending pull.land)
+            new-oid.pending  clay-revision  now.bowl
+          ==
+        =.  repositories  (~(put by repositories) repository.pending applied)
+        =/  push-data=json  (push-event-json commands.pending)
+        =/  clay-data=json
+          %-  pairs:enjs:format
+          :~  ['desk' s+desk-name.pending]
+              ['commit' s+(oid-text:git-codec new-oid.pending)]
+          ==
+        :_  this
+        %+  weld
+          :~  [%pass /webhook/push %agent [our.bowl %urgit] %poke %git-webhook-event !>([repository.pending %push push-data])]
+              [%pass /webhook/clay-sync %agent [our.bowl %urgit] %poke %git-webhook-event !>([repository.pending %clay-sync clay-data])]
+          ==
+        (reply ~)
+      ::  the CI gate in the event that moves the ref (Q5): a parked write
+      ::  that is not a CI landing moves its branch only as
+      ::  ci-completion-refusal allows: never a branch that became
+      ::  CI-protected while it was parked.  a refusal comes after Clay
+      ::  accepted the desk, so the desk is written and the branch is not
+      ::  (P5's compensation obligation), and the requester hears it
+      ::
+      =/  refusal=(unit @t)
+        ?.  ok.result  ~
+        =/  current=(unit repository:git)  (~(get by repositories) repository.pending)
+        %:  ci-completion-refusal:hc
+          repository.pending
+          branch.pending
+          new-oid.pending
+          ?~(current ~ (~(get by refs.u.current) branch.pending))
+        ==
+      =?  result  ?=(^ refusal)  ^-([ok=? message=@t] [%.n u.refusal])
       =.  repositories
         ?.  ok.result  repositories
         =/  clay-revision=(unit @ud)
           %-  mole
           |.(ud:.^(cass:clay %cw /(scot %p our.bowl)/[desk-name.pending]/(scot %da now.bowl)))
+        =/  current=repository:git  (~(gut by repositories) repository.pending applied.pending)
         =/  applied=repository:git
-          (update-binding-success applied.pending new-oid.pending clay-revision now.bowl)
+          %:  update-binding-success
+            (land-onto-current current applied.pending branch.pending new-oid.pending ~)
+            new-oid.pending  clay-revision  now.bowl
+          ==
         (~(put by repositories) repository.pending applied)
       =/  webhook-cards=(list card)
         ?.  ok.result  ~
@@ -8685,6 +10623,30 @@
             ?~  incoming  working
             =.  working  (~(put by working) -.i.incoming +.i.incoming)
             $(incoming t.incoming)
+          ::  the CI gate (Q5): an import writes every ref it fetched at once,
+          ::  so it is gated whole, like a push.  each CI-protected ref it would
+          ::  fast-forward is staged as a candidate against its current tip,
+          ::  with this ship (the import's requester) as the actor, the fetched
+          ::  objects kept and nothing else moved; a CI-protected ref it would
+          ::  create refuses the whole import, and so does an unreadable
+          ::  %urgit-ci
+          ::
+          =/  gate=ci-write
+            %+  ci-write-verdict:hc  repository.u.context
+            (ref-changes ?~(existing ~ refs.u.existing) next-refs)
+          ?:  ?=(%refuse -.gate)
+            (fail message.gate)
+          ?:  ?=(%stage -.gate)
+            ?~  existing
+              (fail 'ci-protected ref has no repository to stage a candidate in')
+            =/  staged=[text=@t cards=(list card)]
+              (ci-stages:hc repository.u.context u.existing stages.gate our.bowl %session)
+            =.  repositories
+              (~(put by repositories) repository.u.context u.existing(objects combined))
+            =.  github-results
+              %+  ~(put by github-results)  job.u.context
+              [%.n %.y kind.u.context repository.u.context (rap 3 ~['nothing applied: ' text.staged])]
+            [cards.staged this]
           =/  origin=github-origin:git  [owner.u.context remote.u.context]
           =/  repo=repository:git
             ?~  existing
@@ -8836,6 +10798,24 @@
   =/  after=peer-ui-state
     =>  +.result
     [peer-activities notification-activities peer-results peer-receiving peer-outgoing]
-  [(peer-ui-notify before after -.result) +.result]
+  ::  a local pull request's head follows its source branch (Delivery 1C,
+  ::  lib/ci-forge follow-source-branches), in the event that moved it
+  =/  synced=_this
+    =/  next=_this  +.result
+    next(repositories (follow-source-branches:ci-forge repos-before =>(next repositories) our.bowl))
+  =/  forge=(list card)
+    =/  who=[actor=@p route=@t]  (arvo-attribution:hc wire parked)
+    (forge-cards:hc repos-before =>(synced repositories) actor.who route.who)
+  ::  CI-RECOVERY-1: the replica pushes that ended in this event, answered
+  ::  to %urgit-ci
+  =/  told=[cards=(list card) pushes=(map @uv recovery-push)]
+    %:  recovery-told:hc
+      =>(synced recovery-pushes)
+      =>(synced github-results)
+      =>(synced peer-outgoing)
+      =>(synced peer-results)
+    ==
+  :-  :(weld (peer-ui-notify before after -.result) forge cards.told)
+  synced(recovery-pushes pushes.told)
 ++  on-fail  on-fail:def
 --

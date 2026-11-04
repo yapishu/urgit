@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { api } from './api.js'
 import { describeGroup, describeHost, describeRole, filterGroups, findGroup, groupMatches, groupNeedle, normalizeGroups, policyFlag, roleOptions } from './groupPolicy.js'
+import { actionArm, arm, deskText, gaps, importClosure, routeArm } from './hoonSource.js'
 
 const repositoryView = readFileSync(
   new URL('./components/RepositoryView.jsx', import.meta.url),
@@ -23,40 +24,27 @@ const settings = repositoryView.slice(
 )
 const groupAccess = settings.slice(
   settings.indexOf('<h3>Group access</h3>'),
-  settings.indexOf('<h3>Protected branches</h3>'),
+  // the section ends where the Runners section begins (the branch policy
+  // lists that follow are their own component, with a filter <input>)
+  settings.indexOf('<RunnersSection />'),
 )
-const groupPeek = backend.slice(
-  backend.indexOf('++  group-peek'),
-  backend.indexOf('++  group-seat'),
-)
-const groupSeat = backend.slice(
-  backend.indexOf('++  group-seat'),
-  backend.indexOf('++  group-members'),
-)
-const groupMembers = backend.slice(
-  backend.indexOf('++  group-members'),
-  backend.indexOf('++  repository-group-capability'),
-)
-const repositoryJson = backend.slice(
-  backend.indexOf('++  repository-json-up-to'),
-  backend.indexOf('++  repository-summary-json'),
-)
-const publicJson = backend.slice(
-  backend.indexOf('++  public-repository-json-up-to'),
-  backend.indexOf('++  repository-summary-json', backend.indexOf('++  public-repository-json-up-to')),
-)
-const setGroupPolicy = backend.slice(
-  backend.indexOf('      %set-group-policy'),
-  backend.indexOf('      %set-write-token'),
-)
-const parseGroupPolicy = backend.slice(
-  backend.indexOf('++  parse-group-policy'),
-  backend.indexOf('++  valid-repository-name'),
-)
-const endpoint = backend.slice(
-  backend.indexOf('?=([%apps %urgit %api %repository @ %group-policy ~] site)'),
-  backend.indexOf('?=([%apps %urgit %api %repository @ %protected ~] site)'),
-)
+assert.ok(settings.indexOf('<RunnersSection />') > settings.indexOf('<h3>Group access</h3>'), 'Group access precedes Runners')
+// the %groups readers live in the helper core the agent door is composed with
+// (=>, ahead of the door) since P2's ci-can-write peek (fence touch 5); the
+// one-line wrappers on-poke's core keeps for its callers are not the bodies
+const groupPeek = arm(backend, 'group-peek')
+const groupSeat = arm(backend, 'group-seat')
+const groupMembers = arm(backend, 'on-poke/group-members')
+// the repository JSON is lib/git-json's, which the agent imports
+const repositoryJson = arm(deskText('lib/git-json.hoon'), 'repository-json-up-to')
+const publicJson = arm(deskText('lib/git-json.hoon'), 'public-repository-json-up-to')
+const setGroupPolicy = actionArm(backend, 'set-group-policy')
+const parseGroupPolicy = arm(backend, 'on-poke/parse-group-policy')
+const endpoint = routeArm(backend, 'repository-settings-api', 'post-repository-group-policy', 'POST', '[%apps %urgit %api %repository @ %group-policy ~]')
+// the agent and every library it imports (skeleton is base-dev's, staged at
+// install): what "the agent reads %groups only here" and "nothing caches a
+// seat" range over
+const allSource = [backend, ...importClosure('app/urgit.hoon', ['lib/skeleton.hoon']).map(([, text]) => text)].join('\n')
 
 async function capture(call, answer = { ok: true, status: 200, text: async () => '{}' }) {
   const originalFetch = globalThis.fetch
@@ -256,8 +244,8 @@ test('the agent reads the seat from %groups per event, fails closed, and never c
   assert.match(groupPeek, /\.\^\(\? %gu \(weld prefix flag\)\)/)
   assert.match(groupPeek, /\.\^\(\* %gx \(weld prefix \(weld under \(weld flag rest\)\)\)\)/)
   assert.match(groupPeek, /\?\.  \?=\(%& -\.raw\)  ~/)
-  assert.equal(backend.match(/\/groups\/\(scot %da now\.bowl\)/g).length, 1)
-  assert.equal(backend.match(/\/groups\/\(scot/g).length, groupPeek.match(/\/groups\/\(scot/g).length)
+  assert.equal(allSource.match(/\/groups\/\(scot %da now\.bowl\)/g).length, 1)
+  assert.equal(allSource.match(/\/groups\/\(scot/g).length, groupPeek.match(/\/groups\/\(scot/g).length)
   // the seat route stays the one unversioned route, soft-cast under mule
   assert.match(groupSeat, /\(group-peek group \/ \/seats\/\(scot %p who\)\/noun\)/)
   assert.match(groupSeat, /;;\(\(unit group-seat:git\) u\.raw\)/)
@@ -266,17 +254,18 @@ test('the agent reads the seat from %groups per event, fails closed, and never c
   assert.match(groupSeat, /\(group-peek group \/v2\/ui \/noun\)/)
   assert.match(groupSeat, /;;\(\[\* init=\? member-count=@ud\] u\.raw\)/)
   assert.match(groupSeat, /\?\.  \?=\(%& -\.ui\)  %\.n/)
-  assert.match(groupSeat, /=\/  seated=\?  \?\|\(\?=\(%pub net\) !=\(~ \(seat-of our\.bowl\)\)\)/)
+  // |( is ?|'s irregular form: the same rune the wide ?|( wrote
+  assert.match(groupSeat, /=\/  seated=\?  \|\(\?=\(%pub net\) !=\(~ \(seat-of our\.bowl\)\)\)/)
   assert.match(groupSeat, /\?\.  \(mirror-trusted:git-access net init seated\)  ~/)
   assert.doesNotMatch(groupSeat, /host\.group\)  ~/)
-  assert.doesNotMatch(backend, /group-seat-cache|seat-cache/)
+  assert.doesNotMatch(allSource, /group-seat-cache|seat-cache/)
   // no age limit, no timestamp comparison: the initialised bit is the whole liveness test
   assert.doesNotMatch(groupSeat + groupPeek + groupMembers, /max-age|mirror-age|joined\.|\(sub now|\(lth now|\(gth now/)
   // the member list for discovery is believed on the same terms, and read by
   // the mark %groups serves /seats/ships as: %ships, never %noun
   assert.match(groupMembers, /\?~  \(group-seat `\[group %none ~\] our\.bowl\)  ~/)
   assert.match(groupMembers, /\(group-peek group \/ \/seats\/ships\/ships\)/)
-  assert.doesNotMatch(backend, /\/seats\/ships\/noun/)
+  assert.doesNotMatch(allSource, /\/seats\/ships\/noun/)
   assert.match(groupMembers, /;;\(\(set ship\) u\.raw\)/)
   assert.match(backend, /\(repository-writable u\.found src\.bowl\)/)
   assert.match(backend, /\(repository-writable repo src\.bowl\)/)
@@ -286,7 +275,7 @@ test('group policy is owner-administered, membership-checked at save, and hidden
   assert.match(setGroupPolicy, /!=\(~ \(group-seat policy\.act our\.bowl\)\)/)
   assert.doesNotMatch(setGroupPolicy, /=\(our\.bowl host\.group\.u\.policy\.act\)/)
   assert.match(parseGroupPolicy, /\[%\| 'host must be a valid ship name'\]/)
-  assert.match(parseGroupPolicy, /\?~  \(group-seat `\[\[u\.host u\.group\] %none ~\] our\.bowl\)\n    \[%\| 'this ship is not a member of that group'\]/)
+  assert.match(gaps(parseGroupPolicy), /\?~  \(group-seat `\[\[u\.host u\.group\] %none ~\] our\.bowl\)  \[%\| 'this ship is not a member of that group'\]/)
   assert.doesNotMatch(parseGroupPolicy, /group host must be this ship/)
   assert.match(endpoint, /'policy is required; null clears it'/)
   assert.match(endpoint, /\[%set-group-policy name ~\]/)

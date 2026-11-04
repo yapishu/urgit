@@ -235,17 +235,25 @@
   ^-  ?
   ?:  authenticated.req  %.y
   ?~  write-token-hash.repo  %.n
+  =/  token=(unit @t)  (basic-password req)
+  ?~  token  %.n
+  =(u.write-token-hash.repo (shas %git-write-token u.token))
+::
+::  the password of a Basic authorization header, if any
+::
+++  basic-password
+  |=  req=inbound-request:eyre
+  ^-  (unit @t)
   =/  header=(unit @t)  (get-header:http 'authorization' header-list.request.req)
-  ?~  header  %.n
-  ?.  (starts-with 'Basic ' u.header)  %.n
+  ?~  header  ~
+  ?.  (starts-with 'Basic ' u.header)  ~
   =/  decoded=(unit octs)
     (de:base64:mimes:html (crip (slag 6 (trip u.header))))
-  ?~  decoded  %.n
+  ?~  decoded  ~
   =/  credentials=tape  (trip q.u.decoded)
   =/  colon=(unit @ud)  (find ":" credentials)
-  ?~  colon  %.n
-  =/  token=@t  (crip (slag +(u.colon) credentials))
-  =(u.write-token-hash.repo (shas %git-write-token token))
+  ?~  colon  ~
+  `(crip (slag +(u.colon) credentials))
 ::
 ++  receive-payload
   |=  [unpack=@t results=(list [ok=? ref=@t message=@t])]
@@ -293,11 +301,45 @@
     ?:(|((starts-with 'localhost' host) (starts-with '127.0.0.1' host)) 'http' 'https')
   (rap 3 ~[scheme '://' host])
 ::
+::  the largest body piece one response fact carries.  The runtime
+::  stops the ship when an effect holds an atom of 2^32 bits (512 MiB)
+::  or more, so a larger body, such as the pack of a full clone, is
+::  given as several pieces of at most 64 MiB each.
+::
+++  body-piece  67.108.864
+::
+++  body-pieces
+  |=  [body=octs size=@ud]
+  ^-  (list octs)
+  ?>  (gth size 0)
+  =/  offset=@ud  0
+  =|  out=(list octs)
+  |-
+  ?:  (gte offset p.body)  (flop out)
+  =/  width=@ud  (min size (sub p.body offset))
+  %=  $
+    offset  (add offset width)
+    out  [[width (cut 3 [offset width] q.body)] out]
+  ==
+::
 ++  give-http
   |=  [eyre-id=@ta status=@ud headers=(list [@t @t]) body=(unit octs)]
   ^-  (list card:agent:gall)
-  %+  give-simple-payload:app:server  eyre-id
-  [[status headers] body]
+  ?:  |(?=(~ body) (lte p.u.body body-piece))
+    %+  give-simple-payload:app:server  eyre-id
+    [[status headers] body]
+  =/  =path  /http-response/[eyre-id]
+  =/  header=response-header:http  [status headers]
+  =/  start=card:agent:gall
+    [%give %fact ~[path] [%http-response-header !>(header)]]
+  =/  pieces=(list card:agent:gall)
+    %+  turn  (body-pieces u.body body-piece)
+    |=  piece=octs
+    ^-  card:agent:gall
+    =/  data=(unit octs)  `piece
+    [%give %fact ~[path] [%http-response-data !>(data)]]
+  =/  done=card:agent:gall  [%give %kick ~[path] ~]
+  [start (snoc pieces done)]
 ::
 ++  give-text
   |=  [eyre-id=@ta status=@ud message=@t]

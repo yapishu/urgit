@@ -1,0 +1,10 @@
+name: fixture-docker
+on: [push]
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: which daemon the job can reach
+        run: |
+          docker info --format 'daemon security={{.SecurityOptions}} root={{.DockerRootDir}}' || echo "docker info failed with status $?"
+          sleep 25

@@ -74,6 +74,23 @@ export const api = {
     method: 'POST', body: JSON.stringify({ ship, repository, title, body }),
   }),
   peerDeleteForgeRequest: (requestId) => request('/peer/forge', { method: 'DELETE', body: JSON.stringify({ request: requestId }) }),
+  // a writer's approval of an untrusted CI candidate on another ship's
+  // repository (P3 D9), tracked like a forge comment
+  // a writer's labels for a pull request on another ship's repository: the
+  // owner decides, and the answer is tracked like a forge comment (kind pull)
+  peerPullLabels: (ship, repository, number, labels) => request('/peer/labels', {
+    method: 'POST', body: JSON.stringify({ ship, repository, number, labels }),
+  }),
+  peerCiApprove: (ship, repository, candidate) => request('/peer/ci-approve', {
+    method: 'POST', body: JSON.stringify({ ship, repository, candidate }),
+  }),
+  // a delegate's CI policy action on another ship's repository (P4,
+  // rider 02): the same action body the owner would post, carried over
+  // the peer protocol and judged by the owner's role bindings; tracked
+  // like a forge comment (kind policy)
+  peerCiAction: (ship, repository, action) => request('/peer/ci-action', {
+    method: 'POST', body: JSON.stringify({ ship, repository, action }),
+  }),
   clearPeerActivity: () => request('/peer/activity', { method: 'DELETE' }),
   peerDiscover: (ship) => request('/peer/discover', { method: 'POST', body: JSON.stringify({ ship }) }),
   // one catalog request to every seated member of a group this ship is in; `group` is a flag, ~host/name
@@ -254,6 +271,12 @@ export const api = {
       method: 'POST', body: JSON.stringify({ state }),
     }),
   mergePull: (name, number) => request(`/repository/${encodeURIComponent(name)}/pulls/${number}/merge`, { method: 'POST', body: '{}' }),
+  // a pull request's labels, replaced whole; the ship answers the labels it
+  // holds, or refuses with its reason
+  setPullLabels: (name, number, labels) =>
+    request(`/repository/${encodeURIComponent(name)}/pulls/${number}/labels`, {
+      method: 'POST', body: JSON.stringify({ labels }),
+    }),
   createIssue: (name, title, body) =>
     request(`/repository/${encodeURIComponent(name)}/issues`, {
       method: 'POST', body: JSON.stringify({ title, body }),
@@ -359,4 +382,84 @@ export async function waitForPeerForge(requestId, { interval = 500 } = {}) {
     missingPolls = 0
     if (!request.active) return request
   }
+}
+
+// the native CI surface (BRIEF-CI-P2 D6): the same origin, the second
+// API base %urgit-ci binds under /apps/urgit/api/ci; every read and the
+// action route are session-authorized like the rest of `api`
+const CI = `${BASE}/ci`
+
+async function ciRequest(path, options = {}) {
+  const response = await fetch(`${CI}${path}`, {
+    credentials: 'same-origin',
+    headers: options.body ? { 'content-type': 'application/json', ...options.headers } : options.headers,
+    ...options,
+  })
+  const text = await response.text()
+  let data = null
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    data = { error: text || `HTTP ${response.status}` }
+  }
+  if (!response.ok) {
+    // the ship's own answer, with its status: a refusal, never a request
+    // whose answer was lost (which rejects without one)
+    const error = new Error(data?.error || `HTTP ${response.status}`)
+    error.status = response.status
+    // a refusal of named fields (a manual run's inputs): each field's reason
+    error.fields = data?.fields || null
+    throw error
+  }
+  return data
+}
+
+export const ci = {
+  candidates: (name, before) => ciRequest(`/repository/${encodeURIComponent(name)}/candidates${before ? `?before=${encodeURIComponent(before)}` : ''}`),
+  candidate: (id) => ciRequest(`/candidate/${encodeURIComponent(id)}`),
+  policy: (name) => ciRequest(`/repository/${encodeURIComponent(name)}/policy`),
+  credentials: (name) => ciRequest(`/repository/${encodeURIComponent(name)}/credentials`),
+  // P4: a lock by digest, the repository's audit trail, a shadow run
+  lock: (name, digest) => ciRequest(`/repository/${encodeURIComponent(name)}/lock/${encodeURIComponent(digest)}`),
+  resolve: (name, revision) => ciRequest(`/repository/${encodeURIComponent(name)}/resolve/${encodeURIComponent(revision)}`),
+  audit: (name) => ciRequest(`/repository/${encodeURIComponent(name)}/audit`),
+  shadow: (id) => ciRequest(`/shadow/${encodeURIComponent(id)}`),
+  key: () => ciRequest('/key'),
+  // the Runners panel (P3 D1/D3): every daemon record with the ship's
+  // clock, and the mint that answers a fresh enrollment token exactly once
+  runners: () => ciRequest('/runners'),
+  mint: () => ciRequest('/runners/mint', { method: 'POST', body: '{}' }),
+  // a runner's withheld slots (legacy-recovery UI ruling 01): its latest
+  // retention report, its recovery commands and what the ship knows of each
+  // retention's attempt; a release is POSTed through action
+  recovery: (id) => ciRequest(`/runners/${encodeURIComponent(id)}/recovery`),
+  // the storage reachability probe (P3 D5): the store's endpoint and one
+  // unsigned URL under the CI prefix for THIS browser to fetch
+  storageProbe: () => ciRequest('/storage/probe'),
+  // CI recovery (CI-RECOVERY-1): the pause, the checkpoints with "written"
+  // and "replica" apart, the checkpoint repository, the staged checkpoint
+  // with its manifest and diff, and what restores brought back. The
+  // recovery actions are POSTed through action
+  recoveryState: () => ciRequest('/recovery'),
+  // the poke as JSON; the ship answers 200 {ok} or the refusal
+  action: (body) => ciRequest('/action', { method: 'POST', body: JSON.stringify(body) }),
+  // manual runs (Delivery 1A): the workflows each branch's promoted
+  // baseline declares for workflow_dispatch, with their inputs; and the
+  // dispatch, answered with the run the ship recorded ({run, fresh}) or the
+  // refusal (each refused input in `fields`)
+  dispatchInventory: (name) => ciRequest(`/repository/${encodeURIComponent(name)}/dispatch`),
+  dispatch: (name, body) => ciRequest(`/repository/${encodeURIComponent(name)}/dispatch`, { method: 'POST', body: JSON.stringify(body) }),
+  // automatic events (Delivery 1C): the source events the ship recorded for
+  // a repository, newest first, with what each selected; and the schedules
+  // of its default branch with the ship's own next, last and missed times
+  events: (name) => ciRequest(`/repository/${encodeURIComponent(name)}/events`),
+  schedules: (name) => ciRequest(`/repository/${encodeURIComponent(name)}/schedules`),
+  // the log route answers a 302 to a presigned store URL; the browser
+  // follows it with no headers of its own and the text is act's jsonl
+  logUrl: (attempt) => `${CI}/attempt/${encodeURIComponent(attempt)}/log`,
+  log: async (attempt) => {
+    const response = await fetch(`${CI}/attempt/${encodeURIComponent(attempt)}/log`, { credentials: 'same-origin', redirect: 'follow' })
+    if (!response.ok) throw new Error(`log: HTTP ${response.status}`)
+    return response.text()
+  },
 }

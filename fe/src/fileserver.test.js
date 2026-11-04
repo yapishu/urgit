@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { gaps } from './hoonSource.js'
 
 const source = readFileSync(
   new URL('../../desk/app/urgit-fileserver.hoon', import.meta.url),
@@ -13,9 +14,11 @@ test('does not put extensionless SPA shells in the Eyre response cache', () => {
   assert.notEqual(routeStart, -1)
   assert.notEqual(assetStart, -1)
 
-  const fallback = source.slice(routeStart, assetStart)
-  assert.match(fallback, /:-\s+\?=\(\^ ext\)\s+\?~\s+ext/)
-  assert.doesNotMatch(fallback, /:-\s+&\s+\?~\s+ext/)
+  // the head of the response cell is its cache flag; its tail, a |^ core,
+  // serves the shell for an extensionless path and the asset otherwise
+  const fallback = gaps(source.slice(routeStart, assetStart))
+  assert.match(fallback, /:-  \?=\(\^ ext\)  \|\^  \?~  ext  serve-shell  serve-asset/)
+  assert.doesNotMatch(fallback, /:-  &  /)
 })
 
 test('evicts known SPA shell entries on init and upgrade', () => {

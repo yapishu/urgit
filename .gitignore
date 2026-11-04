@@ -3,3 +3,16 @@
 /desk-deps/
 /fe/node_modules/
 desk/web/*
+
+REFERENCE-*.md
+QUESTIONS-CI-P0.md
+# the P0-P3 working record (briefs, questions, harness scripts, live
+# tables) stays local: it names local paths, piers and hosts
+/BRIEF-CI-*.md
+/QUESTIONS-CI-*.md
+/.scratch/
+.scratch/*.log
+.scratch/*.err
+.scratch/*.out
+.scratch/*.json
+.scratch/tmp/
