@@ -1,70 +1,57 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { arm, armsNamed, deskText, gaps, importClosure, imports, type, wireArm } from './hoonSource.js'
 
-const backend = readFileSync(
-  new URL('../../desk/app/urgit.hoon', import.meta.url),
-  'utf8',
-)
-const peerTypes = readFileSync(
-  new URL('../../desk/sur/git-peer.hoon', import.meta.url),
-  'utf8',
-)
-
-function arm(name, next) {
-  const marker = `\n++  ${name}\n`
-  const nextMarker = `\n++  ${next}\n`
-  const found = backend.indexOf(marker)
-  const start = found === -1 ? -1 : found + 1
-  if (start === -1) return ''
-  const end = backend.indexOf(nextMarker, start + `++  ${name}`.length)
-  return end === -1 ? backend.slice(start) : backend.slice(start, end)
+const backend = deskText('app/urgit.hoon')
+const peerTypes = deskText('sur/git-peer.hoon')
+// the peer-transfer types, limits and fragment rules live in the library the
+// agent imports them from, not in the agent
+const transferLib = deskText('lib/git-peer-transfer.hoon')
+if (!imports('app/urgit.hoon').includes('lib/git-peer-transfer.hoon')) {
+  throw new Error('%urgit does not import lib/git-peer-transfer')
 }
 
-const onInit = arm('on-init', 'on-save')
-const onSave = arm('on-save', 'on-load')
-const onLoad = arm('on-load', 'on-poke')
-const handlePeer = arm('handle-peer', 'peer-catalog-request')
-const peerTransferYawns = arm('peer-transfer-yawns', 'peer-object-pages')
-const peerServeLifetime = arm('peer-serve-lifetime', 'peer-object-capability')
-const peerDirected = arm('peer-directed', 'peer-fine-name')
-const peerObjectPages = arm('peer-object-pages', 'peer-object-batch-count')
-const peerObjectBatchCount = arm('peer-object-batch-count', 'peer-object-batch')
-const peerObjectBatch = arm('peer-object-batch', 'peer-browse-pages')
-const peerPrepare = arm('peer-prepare', 'peer-stream-next')
-const peerObjectPrepare = peerPrepare.slice(peerPrepare.indexOf('=/  pages=@ud  stream-pages'))
-const peerStreamNext = arm('peer-stream-next', 'peer-stream-grown')
-const peerStreamGrown = arm('peer-stream-grown', 'peer-ready')
-const peerArchiveReady = arm('peer-archive-ready', 'peer-archive-accept')
-const peerArchiveAccept = arm('peer-archive-accept', 'peer-begin')
-const peerBegin = arm('peer-begin', 'peer-begin-objects')
-const peerBeginObjects = arm('peer-begin-objects', 'peer-release')
-const peerRelease = arm('peer-release', 'peer-archive')
-const peerArchive = arm('peer-archive', 'peer-snapshot-fail')
-const peerSnapshotFail = arm('peer-snapshot-fail', 'peer-object-fragments')
-const peerObjectFragments = arm('peer-object-fragments', 'peer-snapshot')
-const peerSnapshot = arm('peer-snapshot', 'handle-action')
-const onArvo = backend.slice(backend.indexOf('++  on-arvo'))
-const fineHandler = onArvo.slice(
-  onArvo.indexOf('[%peer %fine @ @ ~]'),
-  onArvo.indexOf('[%peer %rate @ @ ~]'),
-)
-const serveTimeout = onArvo.slice(
-  onArvo.indexOf('[%peer %serve-timeout @ ~]'),
-  onArvo.indexOf('[%peer %forge-timeout @ ~]'),
-)
-const prepareTimeout = onArvo.slice(
-  onArvo.indexOf('[%peer %prepare-timeout @ ~]'),
-  onArvo.indexOf('[%peer %archive-timeout @ ~]'),
-)
-const archiveTimeout = onArvo.slice(
-  onArvo.indexOf('[%peer %archive-timeout @ ~]'),
-  onArvo.indexOf('[%peer %serve-timeout @ ~]'),
-)
-const rateHandler = onArvo.slice(
-  onArvo.indexOf('[%peer %rate @ @ ~]'),
-  onArvo.indexOf('[%peer %browse @ @ ~]'),
-)
+// the poke handlers are arms of on-poke's core, and each arvo wire has its own
+// arm, which on-arvo's table must send that wire to
+const poke = (name) => arm(backend, `on-poke/${name}`)
+const onArvo = arm(backend, 'on-arvo')
+
+const onInit = arm(backend, 'on-init')
+const onSave = arm(backend, 'on-save')
+const onLoad = arm(backend, 'on-load')
+const handlePeer = poke('handle-peer')
+const peerTransferYawns = poke('peer-transfer-yawns')
+const peerServeLifetime = arm(transferLib, 'peer-serve-lifetime')
+// no ++peer-directed, at any depth, in the agent or any library it imports
+const peerDirected = [backend, ...importClosure('app/urgit.hoon', ['lib/skeleton.hoon']).map(([, text]) => text)]
+  .flatMap((text) => armsNamed(text, 'peer-directed'))
+  .join('\n')
+const peerObjectPages = poke('peer-object-pages')
+const peerObjectBatchCount = poke('peer-object-batch-count')
+const peerObjectBatch = poke('peer-object-batch')
+const peerPrepare = poke('peer-prepare')
+const objectBranchAt = peerPrepare.indexOf('=/  pages=@ud  stream-pages')
+if (objectBranchAt === -1) throw new Error('missing the object branch of ++peer-prepare')
+const peerObjectPrepare = peerPrepare.slice(objectBranchAt)
+const peerStreamNext = poke('peer-stream-next')
+const peerStreamGrown = poke('peer-stream-grown')
+const peerArchiveReady = poke('peer-archive-ready')
+const peerArchiveAccept = poke('peer-archive-accept')
+const peerBegin = poke('peer-begin')
+const peerBeginObjects = poke('peer-begin-objects')
+const peerRelease = poke('peer-release')
+const peerArchive = poke('peer-archive')
+const peerSnapshotFail = poke('peer-snapshot-fail')
+// the page handler hands every page to ++assemble-peer-fragments, the rules
+// upstream extracted into the library: both are the handler's text
+const pageHandler = poke('peer-object-fragments')
+const peerObjectFragments = [pageHandler, arm(transferLib, 'assemble-peer-fragments')].join('\n')
+const peerSnapshot = poke('peer-snapshot')
+const fineHandler = wireArm(backend, '[%peer %fine @ @ ~]', 'peer-fine')
+const serveTimeout = wireArm(backend, '[%peer %serve-timeout @ ~]', 'peer-serve-timeout')
+const prepareTimeout = wireArm(backend, '[%peer %prepare-timeout @ ~]', 'peer-prepare-timeout')
+const archiveTimeout = wireArm(backend, '[%peer %archive-timeout @ ~]', 'peer-archive-timeout')
+const rateHandler = wireArm(backend, '[%peer %rate @ @ ~]', 'peer-rate')
 
 test('raw-object streaming adds a new begin packet and authenticated self packets', () => {
   assert.match(peerTypes, /\+\$  begin\s+[\s\S]*?revision=@ud[\s\S]*?objects=@ud[\s\S]*?pages=@ud/)
@@ -88,9 +75,9 @@ test('raw-object streaming adds a new begin packet and authenticated self packet
 test('transfer-id capability negotiation preserves the legacy request wire and pack fallback', () => {
   assert.match(peerTypes, /\+\$  request\s+[\s\S]*?transfer=@uv[\s\S]*?repository=@t[\s\S]*?haves=\(set oid:git\)/)
   assert.doesNotMatch(peerTypes, /\+\$  request[\s\S]*?capabilit/)
-  assert.match(backend, /\+\+  peer-object-capability\s+0x7572\.6769\.742d\.6132/)
-  assert.match(backend, /\+\+  peer-object-capable[\s\S]*?\(cut 0 \[128 64\] transfer\)/)
-  assert.match(backend, /\+\+  peer-object-transfer[\s\S]*?\(mix \(cut 0 \[0 128\] transfer\) \(lsh \[0 128\] peer-object-capability\)\)/)
+  assert.match(transferLib, /\+\+  peer-object-capability\s+0x7572\.6769\.742d\.6132/)
+  assert.match(arm(transferLib, 'peer-object-capable'), /\+\+  peer-object-capable[\s\S]*?\(cut 0 \[128 64\] transfer\)/)
+  assert.match(arm(transferLib, 'peer-object-transfer'), /\+\+  peer-object-transfer[\s\S]*?\(mix \(cut 0 \[0 128\] transfer\) \(lsh \[0 128\] peer-object-capability\)\)/)
   assert.match(backend, /=\/  raw-transfer=@uv[\s\S]*?=\/  transfer=@uv\s+\(peer-object-transfer raw-transfer\)/)
   assert.match(peerPrepare, /capable=\?/)
   assert.match(peerPrepare, /capable=\?\s+\(peer-object-capable transfer\.req\)/)
@@ -103,29 +90,29 @@ test('transfer-id capability negotiation preserves the legacy request wire and p
   assert.doesNotMatch(peerPrepare, /%archive-ready/)
   assert.match(peerPrepare, /\?\.  streamable[\s\S]*?peer-object-pages objects/)
   assert.match(peerPrepare, /flight=peer-serve[\s\S]*?%pack/)
-  assert.match(backend, /\+\+  peer-fine-name[\s\S]*?\(cut 0 \[0 64\] transfer\)/)
+  assert.match(arm(transferLib, 'peer-fine-name'), /\+\+  peer-fine-name[\s\S]*?\(cut 0 \[0 64\] transfer\)/)
   assert.equal(peerDirected, '')
 })
 
 test('transfer modes and stream jobs are transient and reset on init and load', () => {
-  assert.match(backend, /\+\$  peer-transfer-mode\s+\?\(%archive %pack %objects\)/)
-  assert.match(backend, /\+\$  peer-serve[\s\S]*?mode=peer-transfer-mode/)
-  assert.match(backend, /\+\$  peer-serve[\s\S]*?bytes=@ud[\s\S]*?sent=\?/)
+  assert.match(type(transferLib, 'peer-transfer-mode'), /\+\$  peer-transfer-mode\s+\?\(%archive %pack %objects\)/)
+  assert.match(type(transferLib, 'peer-serve'), /\+\$  peer-serve[\s\S]*?mode=peer-transfer-mode/)
+  assert.match(type(transferLib, 'peer-serve'), /\+\$  peer-serve[\s\S]*?bytes=@ud[\s\S]*?sent=\?/)
   assert.match(
-    backend,
+    type(transferLib, 'peer-object-assembly'),
     /\+\$  peer-object-assembly\s+\[kind=object-kind:git total=@ud next=@ud data=octs\]/,
   )
   assert.match(
-    backend,
+    type(transferLib, 'peer-receive'),
     /\+\$  peer-receive[\s\S]*?mode=peer-transfer-mode[\s\S]*?expected-bytes=@ud[\s\S]*?pending-pages=\(map @ud \(list object-fragment:git-peer\)\)[\s\S]*?assemblies=\(map oid:git peer-object-assembly\)/,
   )
   assert.match(
-    backend,
+    type(transferLib, 'peer-stream-job'),
     /\+\$  peer-stream-job[\s\S]*?target=ship[\s\S]*?transfer=@uv[\s\S]*?repository=@t[\s\S]*?head=@t[\s\S]*?refs=\(map @t oid:git\)[\s\S]*?expected=@ud[\s\S]*?pages=@ud[\s\S]*?revision=@ud[\s\S]*?remaining=\(list \[oid:git object:git\]\)[\s\S]*?offset=@ud[\s\S]*?begun=\?/,
   )
   assert.match(backend, /=\/  peer-stream-jobs\s+\*\(map @uv peer-stream-job\)/)
   assert.match(onInit, /peer-stream-jobs ~/)
-  assert.match(onLoad, /peer-stream-jobs ~/)
+  assert.match(gaps(onLoad), /(?:^|  )peer-stream-jobs  ~(?=  |$)/)
   assert.equal(onSave.trimEnd(), '++  on-save\n  !>(state)\n::')
   assert.doesNotMatch(onSave, /peer-stream-jobs/)
 })
@@ -159,8 +146,8 @@ test('object page v2 uses a list of bounded fragments instead of a map', () => {
 })
 
 test('batch helpers enforce one-MiB fragments and one-MiB pages lazily', () => {
-  assert.match(backend, /\+\+  peer-stream-page-max-fragments\s+512/)
-  assert.match(backend, /\+\+  peer-stream-page-max-bytes\s+1\.048\.576/)
+  assert.match(transferLib, /\+\+  peer-stream-page-max-fragments\s+512/)
+  assert.match(transferLib, /\+\+  peer-stream-page-max-bytes\s+1\.048\.576/)
   assert.match(peerObjectBatchCount, /\|=  objects=\(list \[oid:git object:git\]\)/)
   assert.match(peerObjectBatchCount, /=\(count peer-stream-page-max-fragments\)/)
   assert.match(peerObjectBatchCount, /1\.048\.576/)
@@ -199,9 +186,9 @@ test('stream preparation stores an object job and schedules its first event with
   assert.match(peerObjectPrepare, /flight=peer-serve[\s\S]*?%objects/)
   assert.match(peerObjectPrepare, /job=peer-stream-job/)
   assert.match(peerObjectPrepare, /peer-stream-jobs\s+\(~\(put by peer-stream-jobs\) transfer\.req job\)/)
-  assert.match(peerObjectPrepare, /peer-card our\.bowl[\s\S]*?\[%stream-next transfer\.req\]/)
+  assert.match(gaps(peerObjectPrepare), /%\^  peer-card  our\.bowl  [\s\S]*?\[%stream-next transfer\.req\]/)
   assert.match(peerObjectPrepare, /\/peer\/serve-timeout\//)
-  assert.doesNotMatch(peerObjectPrepare, /\[%ready transfer\.req|%grow snapshot-path/)
+  assert.doesNotMatch(peerObjectPrepare, /(?:\[|:\*\s+)%ready\s+transfer\.req|%grow\s+snapshot-path/)
 })
 
 test('each stream-next builds and grows exactly one bounded fragment list then yields', () => {
@@ -227,7 +214,7 @@ test('stream-grown advances the job and announces begin-objects only after page 
   assert.doesNotMatch(peerStreamGrown, /peer-object-batch|%grow/)
   assert.match(peerStreamGrown, /revision \+\(revision\.job\)/)
   assert.match(peerStreamGrown, /begun %.y/)
-  assert.match(peerStreamGrown, /\[%begin-objects transfer repository\.job revision\.job head\.job refs\.job expected\.job pages\.job\]/)
+  assert.match(gaps(peerStreamGrown), /:\*  %begin-objects  transfer  repository\.job  revision\.job  head\.job  refs\.job  expected\.job  pages\.job  ==/)
   assert.match(peerStreamGrown, /peer-card our\.bowl[\s\S]*?\[%stream-next transfer\]/)
   assert.match(peerStreamGrown, /peer-stream-jobs\s+\(~\(put by peer-stream-jobs\) transfer next\)/)
   assert.doesNotMatch(peerStreamGrown, /%behn|%wait/)
@@ -238,8 +225,8 @@ test('begin-objects mirrors begin validation, selects object mode, and fills the
   assert.match(peerBeginObjects, /=\(repository\.msg source-repository\.u\.found\)/)
   assert.match(peerBeginObjects, /\(gth pages\.msg 0\)/)
   assert.doesNotMatch(peerBeginObjects, /\(lte pages\.msg \(max 1 objects\.msg\)\)/)
-  assert.match(peerBeginObjects, /mode %objects/)
-  assert.match(backend, /\+\+  peer-stream-window\s+8/)
+  assert.match(gaps(peerBeginObjects), /(?:^|  )mode  %objects(?=  |$)/)
+  assert.match(transferLib, /\+\+  peer-stream-window\s+8/)
   assert.match(peerBeginObjects, /turn\s+\(gulf 1 \(min pages\.msg peer-stream-window\)\)/)
   assert.match(peerBeginObjects, /\/g\/x\/\(scot %ud revision\)\/urgit\/\/1\/fine/)
   assert.match(peerBeginObjects, /%keen %.n src\.bowl scry-path/)
@@ -247,7 +234,7 @@ test('begin-objects mirrors begin validation, selects object mode, and fills the
 })
 
 test('pack begin remains sequential and explicitly preserves pack mode', () => {
-  assert.match(peerBegin, /mode %pack/)
+  assert.match(gaps(peerBegin), /(?:^|  )mode  %pack(?=  |$)/)
   assert.match(peerBegin, /\/g\/x\/1\/urgit\/\/1\/fine/)
   assert.match(peerBegin, /%keen %.n src\.bowl scry-path/)
 })
@@ -266,11 +253,11 @@ test('Fine molds object fragment lists while retaining the exact pack fallback',
 })
 
 test('release, snapshot failure, supersede, and serve timeout delete stream jobs', () => {
-  assert.match(peerRelease, /peer-stream-jobs \(~\(del by peer-stream-jobs\) transfer\)/)
+  assert.match(gaps(peerRelease), /(?:^|  )peer-stream-jobs  \(~\(del by peer-stream-jobs\) transfer\)/)
   assert.match(peerSnapshotFail, /peer-stream-jobs\s+\(~\(del by peer-stream-jobs\) transfer\)/)
   assert.match(peerPrepare, /peer-stream-jobs[\s\S]*?superseded-ids/)
   assert.match(peerPrepare, /~\(del by peer-stream-jobs\)/)
-  assert.match(serveTimeout, /peer-stream-jobs \(~\(del by peer-stream-jobs\) u\.transfer\)/)
+  assert.match(gaps(serveTimeout), /(?:^|  )peer-stream-jobs  \(~\(del by peer-stream-jobs\) u\.transfer\)/)
 })
 
 test('stream handlers no-op if either their job or object serving flight disappeared', () => {
@@ -295,6 +282,8 @@ test('fragment pages reject malformed bounds and duplicate oid/offset pairs befo
     peerObjectFragments,
     /\|=  \[transfer=@uv revision=@ud fragments=\(list object-fragment:git-peer\)\]/,
   )
+  // every page that passes the handler's own bounds goes through the extracted rules
+  assert.match(pageHandler, /\(assemble-peer-fragments flight fragments\)/)
   assert.match(peerObjectFragments, /=\(\(lent fragments\) 0\)/)
   assert.match(peerObjectFragments, /\(gth \(lent fragments\) peer-stream-page-max-fragments\)/)
   assert.match(peerObjectFragments, /\(gth page-bytes peer-stream-page-max-bytes\)/)
@@ -350,15 +339,15 @@ test('out-of-order pages are cached and drained sequentially without reopening t
 })
 
 test('hostile object announcements and partial assembly state have hard limits', () => {
-  assert.match(backend, /\+\+  peer-stream-max-objects\s+25\.000/)
-  assert.match(backend, /\+\+  peer-stream-max-pages\s+65\.536/)
-  assert.match(backend, /\+\+  peer-stream-max-object-bytes\s+67\.108\.864/)
-  assert.match(backend, /\+\+  peer-stream-max-assembly-bytes\s+67\.108\.864/)
-  assert.match(backend, /\+\+  peer-archive-max-objects\s+250\.000/)
-  assert.match(backend, /\+\+  peer-archive-max-bytes\s+1\.073\.741\.824/)
-  assert.match(backend, /\+\+  peer-archive-max-object-bytes\s+536\.870\.912/)
-  assert.match(backend, /\+\$  peer-receive[\s\S]*?assemblies=\(map oid:git peer-object-assembly\)[\s\S]*?assembly-bytes=@ud/)
-  assert.match(backend, /\+\$  peer-receive[\s\S]*?assembly-bytes=@ud[\s\S]*?assembly-count=@ud/)
+  assert.match(transferLib, /\+\+  peer-stream-max-objects\s+25\.000/)
+  assert.match(transferLib, /\+\+  peer-stream-max-pages\s+65\.536/)
+  assert.match(transferLib, /\+\+  peer-stream-max-object-bytes\s+67\.108\.864/)
+  assert.match(transferLib, /\+\+  peer-stream-max-assembly-bytes\s+67\.108\.864/)
+  assert.match(transferLib, /\+\+  peer-archive-max-objects\s+250\.000/)
+  assert.match(transferLib, /\+\+  peer-archive-max-bytes\s+1\.073\.741\.824/)
+  assert.match(transferLib, /\+\+  peer-archive-max-object-bytes\s+536\.870\.912/)
+  assert.match(type(transferLib, 'peer-receive'), /\+\$  peer-receive[\s\S]*?assemblies=\(map oid:git peer-object-assembly\)[\s\S]*?assembly-bytes=@ud/)
+  assert.match(type(transferLib, 'peer-receive'), /\+\$  peer-receive[\s\S]*?assembly-bytes=@ud[\s\S]*?assembly-count=@ud/)
   assert.match(peerPrepare, /stream-pages=@ud\s+\(peer-object-batch-count objects\)/)
   assert.match(peerPrepare, /\(lte object-count peer-stream-max-objects\)/)
   assert.match(peerPrepare, /\(lte stream-pages peer-stream-max-pages\)/)
@@ -371,7 +360,14 @@ test('hostile object announcements and partial assembly state have hard limits',
   assert.match(peerArchive, /\(lte p\.data\.\+\.entry peer-archive-max-object-bytes\)/)
   assert.match(peerBeginObjects, /\(lte objects\.msg peer-stream-max-objects\)/)
   assert.match(peerBeginObjects, /\(lte pages\.msg peer-stream-max-pages\)/)
-  assert.match(peerBeginObjects, /\(lte pages\.msg \(mul objects\.msg 16\)\)/)
+  // the reviewed peer correction (P4 stage 2, part C): an announced object takes
+  // at most peer-stream-max-object-pages pages, ceil(64 MiB / 1 MiB), not 16
+  assert.match(peerBeginObjects, /\(lte pages\.msg \(mul objects\.msg peer-stream-max-object-pages\)\)/)
+  assert.doesNotMatch(peerBeginObjects, /\(mul objects\.msg 16\)/)
+  assert.match(
+    arm(transferLib, 'peer-stream-max-object-pages'),
+    /\(div \(add peer-stream-max-object-bytes \(dec 1\.048\.576\)\) 1\.048\.576\)/,
+  )
   assert.match(peerBeginObjects, /=\(revision\.msg 1\)/)
   assert.match(peerObjectFragments, /\(lte total\.fragment peer-stream-max-object-bytes\)/)
   assert.match(peerObjectFragments, /assembly-bytes\.next/)
@@ -417,7 +413,7 @@ test('Mesa archives retain a distinct mode and validate negotiated object bounds
   assert.match(peerArchiveReady, /=\('' head\.flight\)/)
   assert.match(peerArchiveReady, /\(gth objects\.msg peer-archive-max-objects\)/)
   assert.match(peerArchiveReady, /\(gth bytes\.msg peer-archive-max-bytes\)/)
-  assert.match(peerArchiveReady, /flight\(mode %archive,[\s\S]*?expected objects\.msg,[\s\S]*?expected-bytes bytes\.msg/)
+  assert.match(gaps(peerArchiveReady), /%=  flight  mode  %archive  [\s\S]*?expected  objects\.msg  [\s\S]*?expected-bytes  bytes\.msg/)
   assert.match(peerArchiveReady, /\[%archive-accept transfer\.msg\]/)
   assert.match(peerArchiveReady, /\/peer\/archive-timeout\//)
   assert.match(peerArchiveReady, /\(add now\.bowl ~d1\)/)
@@ -441,8 +437,8 @@ test('Mesa archives retain a distinct mode and validate negotiated object bounds
 test('Mesa handshake separates preparation from bulk delivery timeouts', () => {
   // The serving side no longer announces an archive; %archive-ready is a
   // message we receive, not one we send.
-  assert.doesNotMatch(peerPrepare, /\[%archive-ready transfer\.req/)
-  assert.doesNotMatch(peerPrepare, /\[%archive transfer\.req/)
+  assert.doesNotMatch(peerPrepare, /(?:\[|:\*\s+)%archive-ready\s+transfer\.req/)
+  assert.doesNotMatch(peerPrepare, /(?:\[|:\*\s+)%archive\s+transfer\.req/)
   assert.match(prepareTimeout, /accepted\.u\.found/)
   assert.match(prepareTimeout, /=\('' head\.u\.found\)/)
   assert.match(archiveTimeout, /=\(%archive mode\.u\.found\)/)

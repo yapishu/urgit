@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { arm, deskText } from './hoonSource.js'
 import { api } from './api.js'
 
 const repositoryView = readFileSync(
@@ -15,42 +16,29 @@ const backend = readFileSync(
   new URL('../../desk/app/urgit.hoon', import.meta.url),
   'utf8',
 )
+// the browse and transfer JSON and the offer record are lib/git-json's and
+// lib/git-peer-transfer's, which the agent imports
+const json = deskText('lib/git-json.hoon')
+const transferLib = deskText('lib/git-peer-transfer.hoon')
+// the text from `start` to `end`, both of which must be there, in that order
+function between(source, start, end) {
+  const startAt = source.indexOf(start)
+  const endAt = source.indexOf(end, startAt + 1)
+  if (startAt === -1 || endAt === -1) throw new Error(`missing ${startAt === -1 ? start : end}`)
+  return source.slice(startAt, endAt)
+}
 const settings = repositoryView.slice(
   repositoryView.indexOf('function Settings'),
   repositoryView.indexOf('export default function RepositoryView'),
 )
-const peerBrowse = backend.slice(
-  backend.indexOf('++  peer-browse-request'),
-  backend.indexOf('++  peer-browse-ready'),
-)
-const peerBrowseJson = backend.slice(
-  backend.indexOf('++  peer-repository-browse-json'),
-  backend.indexOf('++  repository-revision'),
-)
-const publicScries = backend.slice(
-  backend.indexOf('++  on-peek'),
-  backend.indexOf('++  on-watch'),
-)
-const peerError = backend.slice(
-  backend.indexOf('++  peer-error'),
-  backend.indexOf('++  handle-peer'),
-)
-const peerResultReceived = backend.slice(
-  backend.indexOf('++  peer-result-received'),
-  backend.indexOf('++  peer-request'),
-)
-const peerPrepare = backend.slice(
-  backend.indexOf('++  peer-prepare'),
-  backend.indexOf('++  peer-ready'),
-)
-const peerRelease = backend.slice(
-  backend.indexOf('++  peer-release'),
-  backend.indexOf('++  peer-snapshot-fail'),
-)
-const peerResultsJson = backend.slice(
-  backend.indexOf('++  peer-ui-transfers-json'),
-  backend.indexOf('++  peer-ui-json'),
-)
+const peerBrowse = between(backend, '++  peer-browse-request', '++  peer-browse-ready')
+const peerBrowseJson = arm(json, 'peer-repository-browse-json')
+const publicScries = between(backend, '++  on-peek', '++  on-watch')
+const peerError = between(backend, '++  peer-error', '++  handle-peer')
+const peerResultReceived = between(backend, '++  peer-result-received', '++  peer-request')
+const peerPrepare = between(backend, '++  peer-prepare', '++  peer-ready')
+const peerRelease = between(backend, '++  peer-release', '++  peer-snapshot-fail')
+const peerResultsJson = arm(transferLib, 'peer-ui-transfers-json')
 
 test('setReader posts the ship reader permission to the encoded repository route', async () => {
   const originalFetch = globalThis.fetch
@@ -115,7 +103,7 @@ test('snapshot service activity does not replace its outgoing offer', () => {
 })
 
 test('outgoing offers remain active until authoritative state is consumed', () => {
-  assert.match(backend, /\+\$  peer-offer-flight/)
+  assert.match(transferLib, /\+\$  peer-offer-flight/)
   assert.match(backend, /=\/  peer-outgoing\s+\*\(map @uv peer-offer-flight\)/)
   assert.match(peerResultsJson, /offer=\(unit peer-offer-flight\).*~\(get by outgoing\.ui\) transfer/)
   assert.match(peerResultsJson, /\['active' b\+\|\(\?=\(\^ flight\) \?=\(\^ offer\)\)\]/)
@@ -128,13 +116,18 @@ test('peer results authenticate and consume one active outgoing offer', () => {
 })
 
 test('outgoing offers have a terminal timeout independent of activity history', () => {
-  assert.equal([...backend.matchAll(/\/peer\/offer-timeout\/\(scot %uv transfer\)/g)].length, 2)
+  // every offer arms its own timeout: the push, the pull request, and the
+  // checkpoint replica's push (CI-RECOVERY-1)
+  const offers = [...backend.matchAll(/\/peer\/offer\/\(scot %uv transfer\)/g)].length
+  assert.equal(offers, 3)
+  assert.equal([...backend.matchAll(/\/peer\/offer-timeout\/\(scot %uv transfer\)/g)].length, offers)
   assert.match(backend, /\[%peer %offer-timeout @ ~\]/)
   assert.match(backend, /peer-outgoing\s+\(~\(del by peer-outgoing\) u\.transfer\)/)
   assert.match(backend, /peer-results\s+[\s\S]*\[%.n message repository\.u\.outgoing\]/)
-  const clearActivity = backend.slice(
-    backend.indexOf("?=([%apps %urgit %api %peer %activity ~] site)"),
-    backend.indexOf("?=([%apps %urgit %api %peer %transfers ~] site)"),
+  const clearActivity = between(
+    backend,
+    "?=([%apps %urgit %api %peer %activity ~] site)",
+    "?=([%apps %urgit %api %peer %transfers ~] site)",
   )
   assert.doesNotMatch(clearActivity, /peer-outgoing/)
 })

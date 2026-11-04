@@ -5,6 +5,7 @@ import { CommitDetail, DiffView } from './RepositoryView'
 import { HighlightedCode } from './HighlightedCode'
 import MarkdownDocument from './MarkdownDocument'
 import Readme from './Readme'
+import PullLabels from './PullLabels'
 import { exactBytes, formatBytes } from '../format'
 import { peerTransferPresentation } from '../peerTransfer'
 import { useLocalDraft } from '../useLocalDraft'
@@ -79,11 +80,25 @@ export default function RemoteRepositoryView({ ship, repository, repositories, d
       request = started.request
       const found = await waitForPeerBrowse(request)
       if (!found.ok) throw new Error(found.message || `Could not load ${kind}`)
-      setDetail(found.result?.[kind] || null)
+      const result = found.result?.[kind]
+      setDetail(result ? { ...result, labelsEditable: kind === 'pull' && found.result.labelsEditable === true } : null)
     } catch (cause) {
       setDetailError(cause.message)
     } finally {
       if (request) api.peerDeleteBrowse(request).catch(() => {})
+    }
+  }
+  async function saveLabels(labels) {
+    let request = ''
+    try {
+      const started = await api.peerPullLabels(ship, repository, selected.item.number, labels)
+      request = started.request
+      const found = await waitForPeerForge(request)
+      if (!found.ok) throw new Error(found.message || 'The repository owner refused the labels')
+      if (found.result) setDetail({ ...found.result, labelsEditable: true })
+      return { labels: found.result?.labels || labels }
+    } finally {
+      if (request) api.peerDeleteForgeRequest(request).catch(() => {})
     }
   }
   async function inspectCommit(commit, pushHistory = true) {
@@ -233,9 +248,9 @@ export default function RemoteRepositoryView({ ship, repository, repositories, d
     <section className="repo-body">
       {tab === 'code' && (filePath ? <RemoteFileView path={filePath} loadFile={loadPeerFile} onBack={() => history.back()} /> : <><FileTree files={data.files?.files || []} onOpen={openFile} onOpenCommit={inspectCommit} /><Readme files={data.files?.files || []} loadFile={loadPeerFile} onOpen={openFile} /></>)}
       {tab === 'commits' && (commitOid ? commitLoading ? <div className="empty"><span className="spinner" /> Loading commit from peer…</div> : commitError ? <div className="inline-error">{commitError}</div> : <CommitDetail data={commitDetail} onBack={() => history.back()} /> : <div className="commit-list">{commits.map((commit) => { const date = formatDate(commit.committer?.timestamp); return <div className="commit-row" key={commit.oid}><span className="commit-avatar">{(commit.author?.name || '?').slice(0, 1).toUpperCase()}</span><div><strong>{commit.subject || 'Untitled commit'}</strong><small>{commit.author?.name || commit.author?.email || 'Unknown author'}{date ? ` committed ${date}` : ''}</small></div><button className="commit-hash" title={`View ${commit.oid}`} onClick={() => inspectCommit(commit)}><code>{shortOid(commit.oid)}</code></button></div> })}</div>)}
-      {selected && <RemoteForgeDetail selected={selected} detail={detail} error={detailError} comment={comment} commentBusy={commentBusy} onCommentChange={setComment} onComment={addComment} onBack={() => history.back()} />}
+      {selected && <RemoteForgeDetail selected={selected} detail={detail} error={detailError} comment={comment} commentBusy={commentBusy} onCommentChange={setComment} onComment={addComment} onSaveLabels={saveLabels} onBack={() => history.back()} />}
       {!selected && tab === 'issues' && <>{issueCreating && <form className="panel issue-composer" onSubmit={createIssue}><div className="section-title"><div><h2>New issue</h2><p className="quiet">Open an issue on {ship}/{repository} as this ship.</p></div><button type="button" className="text-button" onClick={() => { setIssueCreating(false); setIssueError('') }}>Cancel</button></div><label><span>Title</span><input autoFocus required value={issueTitle} maxLength="200" onChange={(event) => setIssueTitle(event.target.value)} /></label><label><span>Description</span><textarea value={issueBody} maxLength="65536" onChange={(event) => setIssueBody(event.target.value)} placeholder="Describe the problem or proposal…" /></label>{issueError && <div className="inline-error">{issueError}</div>}<div className="form-actions"><button className="button primary" disabled={issueBusy || !issueTitle.trim()}>{issueBusy ? 'Opening…' : 'Open issue'}</button></div></form>}<div className="forge-toolbar"><span>{issues.length} issues</span><div className="forge-toolbar-actions"><button className="button primary" disabled={issueBusy} onClick={() => { setIssueCreating(!issueCreating); setIssueError('') }}>New issue</button></div></div>{!issues.length ? <div className="empty compact">No issues.</div> : <div className="issue-list">{issues.map((issue) => issue.source === 'github' ? <a className="issue-row forge-link" href={issue.url} target="_blank" rel="noreferrer" key={`github-${issue.number}`}><span className={`issue-icon ${issue.state}`}>◉</span><div><h3>{issue.title}</h3><p>#{issue.number} · {issue.state} · {issue.author} · GitHub</p></div><span className="external-arrow">↗</span></a> : <button type="button" className="issue-row remote-forge-row" onClick={() => inspect('issue', issue)} key={`native-${issue.number}`}><span className={`issue-icon ${issue.state}`}>◉</span><div><h3>{issue.title}</h3><p>#{issue.number} · {issue.state} · {issue.author} · {commentCounts[`issue-${issue.number}`] ?? issue.commentCount ?? 0} comments</p><div className="issue-labels inline">{(issue.labels || []).map((label) => <span key={label}>{label}</span>)}</div></div></button>)}</div>}</>}
-      {!selected && tab === 'pulls' && (!pulls.length ? <div className="empty compact">No pull requests.</div> : <div className="pull-list">{pulls.map((pull) => pull.source === 'github' ? <a className="pull-row forge-link" href={pull.url} target="_blank" rel="noreferrer" key={`github-${pull.number}`}><div><span className={`status ${pull.state === 'open' ? 'good' : ''}`}>{pull.draft ? 'draft' : pull.state}</span><h3>#{pull.number} {pull.title}</h3><p>opened by <strong>{pull.author}</strong> on GitHub</p></div><span className="external-arrow">↗</span></a> : <button type="button" className="pull-row remote-forge-row" onClick={() => inspect('pull', pull)} key={`native-${pull.number}`}><div><span className={`status ${pull.state === 'open' ? 'good' : ''}`}>{pull.state}</span><h3>#{pull.number} {pull.title}</h3><p><code>{pull.sourceShip}/{pull.sourceRepository}</code> proposes <code>{shortOid(pull.head)}</code> into <code>{shortOid(pull.base)}</code> · {commentCounts[`pull-${pull.number}`] ?? pull.commentCount ?? 0} comments</p></div></button>)}</div>)}
+      {!selected && tab === 'pulls' && (!pulls.length ? <div className="empty compact">No pull requests.</div> : <div className="pull-list">{pulls.map((pull) => pull.source === 'github' ? <a className="pull-row forge-link" href={pull.url} target="_blank" rel="noreferrer" key={`github-${pull.number}`}><div><span className={`status ${pull.state === 'open' ? 'good' : ''}`}>{pull.draft ? 'draft' : pull.state}</span><h3>#{pull.number} {pull.title}</h3><p>opened by <strong>{pull.author}</strong> on GitHub</p></div><span className="external-arrow">↗</span></a> : <button type="button" className="pull-row remote-forge-row" onClick={() => inspect('pull', pull)} key={`native-${pull.number}`}><div><span className={`status ${pull.state === 'open' ? 'good' : ''}`}>{pull.state}</span><h3>#{pull.number} {pull.title}</h3><p><code>{pull.sourceShip}/{pull.sourceRepository}</code> proposes <code>{shortOid(pull.head)}</code> into <code>{shortOid(pull.base)}</code> · {commentCounts[`pull-${pull.number}`] ?? pull.commentCount ?? 0} comments</p>{(pull.labels || []).length > 0 && <div className="issue-labels inline" aria-label="Labels">{pull.labels.map((label) => <span key={label}>{label}</span>)}</div>}</div></button>)}</div>)}
       {tab === 'branches' && <div className="table"><div className="table-head"><span>Branch</span><span>Commit</span></div>{(repo.refs || []).filter((ref) => ref.name.startsWith('refs/heads/')).map((ref) => <div className="table-row" key={ref.name}><strong>{ref.name.replace('refs/heads/', '')}</strong><code>{shortOid(ref.oid)}</code></div>)}</div>}
     </section>
     {forkDialog && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setForkDialog(false)}><section className="modal-card" role="dialog" aria-modal="true" aria-label="Fork repository"><header><div><span className="eyebrow">Fork</span><h1>{ship}/{repository}</h1></div><button type="button" className="icon-button" onClick={() => setForkDialog(false)} aria-label="Close">×</button></header><form onSubmit={fork}><label><span>Local repository name</span><input autoFocus required pattern="[A-Za-z0-9._-]+" maxLength="100" value={localName} onChange={(event) => setLocalName(event.target.value)} /></label>{sameOrigin && <small className="field-note">This updates the existing fork from the same origin.</small>}{blockedCollision && <small className="field-error">That name belongs to another repository. Choose a different local name.</small>}<label className="check-row"><input type="checkbox" checked={publicRead} onChange={(event) => setPublicRead(event.target.checked)} /><span><strong>Public local fork</strong><small>Allow other ships and Git clients to fetch this copy.</small></span></label><div className="form-actions"><button type="button" className="button ghost" onClick={() => setForkDialog(false)}>Cancel</button><button className="button primary" disabled={blockedCollision || !localName.trim()}>{sameOrigin ? 'Update fork' : 'Fork repository'}</button></div></form></section></div>}
@@ -259,7 +274,7 @@ function RemoteFileView({ path, loadFile, onBack }) {
   </div>
 }
 
-function RemoteForgeDetail({ selected, detail, error, comment, commentBusy, onCommentChange, onComment, onBack }) {
+function RemoteForgeDetail({ selected, detail, error, comment, commentBusy, onCommentChange, onComment, onSaveLabels, onBack }) {
   const kind = selected.kind
   const fallback = selected.item
   const item = detail || fallback
@@ -268,6 +283,7 @@ function RemoteForgeDetail({ selected, detail, error, comment, commentBusy, onCo
     <button className="text-button file-back" onClick={onBack}>← {kind === 'issue' ? 'Issues' : 'Pull requests'}</button>
     <header className="pull-detail-header"><div><h2>#{item.number} {item.title}</h2><p><span className={`status ${item.state === 'open' ? 'good' : ''}`}>{item.state}</span> {kind === 'issue' ? <>opened by <strong>{item.author}</strong></> : <><code>{item.sourceShip}/{item.sourceRepository}</code> proposes <code>{shortOid(item.head)}</code> into <code>{shortOid(item.base)}</code></>}</p></div></header>
     {error && <div className="inline-error">{error}</div>}
+    {kind === 'pull' && <PullLabels labels={detail?.labels || fallback.labels || []} editable={Boolean(detail?.labelsEditable)} onSave={onSaveLabels} />}
     {!detail && !error ? <div className="empty"><span className="spinner" /> Loading discussion from {fallback.sourceShip || fallback.author || 'peer'}…</div> : detail && <>
       {kind === 'issue' ? <div className="issue-layout"><div className="issue-thread"><article className="review-comment"><header><strong>{detail.author}</strong><span title={detail.created}>{detail.created}</span></header><p>{detail.body || 'No description provided.'}</p></article><RemoteDiscussion comments={comments} /><RemoteCommentComposer value={comment} busy={commentBusy} onChange={onCommentChange} onSubmit={onComment} /></div><aside className="issue-sidebar"><section><strong>Labels</strong><div className="issue-labels">{(detail.labels || []).map((label) => <span key={label}>{label}</span>)}{!(detail.labels || []).length && <small>None</small>}</div></section><section><strong>Assignees</strong><div>{(detail.assignees || []).map((assignee) => <code key={assignee}>{assignee}</code>)}{!(detail.assignees || []).length && <small>Unassigned</small>}</div></section></aside></div> : <><DiffView diff={detail} /><section className="review-discussion"><h3>Discussion <span>{comments.length}</span></h3><RemoteDiscussion comments={comments} pull /><RemoteCommentComposer value={comment} busy={commentBusy} onChange={onCommentChange} onSubmit={onComment} /></section></>}
     </>}

@@ -1,4 +1,7 @@
 import test from 'node:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import React from 'react'
@@ -6,12 +9,14 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
 
 async function renderMarkdownDocument(source, props = {}) {
-  const server = await createServer({ server: { middlewareMode: true, hmr: false }, appType: 'custom' })
+  const cacheDir = mkdtempSync(join(tmpdir(), 'urgit-ssr-'))
+  const server = await createServer({ configLoader: 'native', cacheDir, server: { middlewareMode: true, ws: false, hmr: false, watch: null }, appType: 'custom' })
   try {
     const { default: MarkdownDocument } = await server.ssrLoadModule('/src/components/MarkdownDocument.jsx')
     return renderToStaticMarkup(React.createElement(MarkdownDocument, props, source))
   } finally {
     await server.close()
+    rmSync(cacheDir, { recursive: true, force: true })
   }
 }
 

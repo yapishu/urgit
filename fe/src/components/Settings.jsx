@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import CiRecovery from './CiRecovery'
 
 const themes = ['system', 'light', 'dark']
 
@@ -52,6 +53,7 @@ export default function Settings({ theme, onThemeChange, onImport, onBack, repos
             {status?.tokenSet && <button className="text-button danger-text" disabled={busy} onClick={clear}>Disconnect GitHub</button>}
           </div>
         </section>
+        <CiRecovery />
       </div>
     </main>
   )

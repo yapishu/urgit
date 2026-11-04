@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { api } from './api.js'
 import { countParts, describeCounts, describeGrant, describeHold, describeReach, describeVia, discoveryStatus, groupOptionLabel, mergeDiscoveries } from './groupDiscovery.js'
 import { describeHost, normalizeGroups } from './groupPolicy.js'
+import { arm, gaps, importClosure, routeArm, wireArm } from './hoonSource.js'
 
 const sidebar = readFileSync(new URL('./components/Sidebar.jsx', import.meta.url), 'utf8')
 const app = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
@@ -14,27 +15,20 @@ const catalogLib = readFileSync(new URL('../../desk/lib/git-catalog.hoon', impor
 const stateSur = readFileSync(new URL('../../desk/sur/git.hoon', import.meta.url), 'utf8')
 const catalogVector = readFileSync(new URL('../../desk/gen/git-catalog-vector.hoon', import.meta.url), 'utf8')
 const mark = readFileSync(new URL('../../desk/mar/git-peer.hoon', import.meta.url), 'utf8')
-const catalogRequest = backend.slice(
-  backend.indexOf('++  peer-catalog-request'),
-  backend.indexOf('++  peer-catalog-legacy'),
-)
-const discoverGroup = backend.slice(
-  backend.indexOf("?=([%apps %urgit %api %peer %discover-group ~] site)"),
-  backend.indexOf("?=([%apps %urgit %api %peer %discoveries ~] site)", backend.indexOf("%discover-group ~] site)")),
-)
-const discoverOne = backend.slice(
-  backend.indexOf("?=([%apps %urgit %api %peer %discover ~] site)"),
-  backend.indexOf("?=([%apps %urgit %api %peer %discover-group ~] site)"),
-)
-const onAgent = backend.slice(backend.indexOf('++  on-agent'), backend.indexOf('++  on-arvo'))
-const discoveryTimeout = backend.slice(
-  backend.indexOf('[%peer %discovery-timeout @ ~]'),
-  backend.indexOf('[%clay-publish ~]'),
-)
-const discoveriesJson = backend.slice(
-  backend.indexOf('++  peer-discoveries-json'),
-  backend.indexOf('++  group-flag-json'),
-)
+const catalogRequest = arm(backend, 'on-poke/peer-catalog-request')
+const discoverGroup = routeArm(backend, 'peer-api', 'post-peer-discover-group', 'POST', '[%apps %urgit %api %peer %discover-group ~]')
+const discoverOne = routeArm(backend, 'peer-api', 'post-peer-discover', 'POST', '[%apps %urgit %api %peer %discover ~]')
+const onAgent = arm(backend, 'on-agent')
+const discoveryTimeout = wireArm(backend, '[%peer %discovery-timeout @ ~]', 'peer-discovery-timeout')
+const discoveriesJson = arm(backend, 'on-poke/peer-discoveries-json')
+// the agent and every library it imports (skeleton is base-dev's, staged at install)
+const allSource = [backend, ...importClosure('app/urgit.hoon', ['lib/skeleton.hoon']).map(([, text]) => text)].join('\n')
+// %urgit's own state and the files it versions: every file of its closure
+// but sur/ci.hoon, which is %urgit-ci's state (versioned on its own under
+// CI-STATE-MIGRATION-1, state-5 since Delivery 1C) and is imported here
+// only for the CI action and candidate types
+const gitStateSource = [backend, ...importClosure('app/urgit.hoon', ['lib/skeleton.hoon']).filter(([rel]) => rel !== 'sur/ci.hoon').map(([, text]) => text)].join('\n')
+const ciStateSur = readFileSync(new URL('../../desk/sur/ci.hoon', import.meta.url), 'utf8')
 // the three sections of the sidebar, in the order they render
 const sections = ['repositories', 'peers', 'groups'].map((name) => sidebar.indexOf(`toggleSection('${name}')`))
 const peersSection = sidebar.slice(sections[1], sections[2])
@@ -198,13 +192,18 @@ test('the footer under an open group counts every member by how it stands and dr
 test('one catalog request rides to a ship at a time: a ship still unacked is recorded as pending, not asked again', () => {
   // the ledger is transient, beside the discoveries, and no state version carries it
   assert.match(backend, /^=\/  peer-inflight  \*ledger:git-catalog$/m)
-  assert.match(backend, /peer-discoveries ~, peer-inflight ~, peer-browses ~/)
+  assert.match(gaps(backend), /(?:^|  )peer-discoveries  ~  peer-inflight  ~  peer-browses  ~(?=  |$)/)
   assert.match(catalogLib, /\+\$  ledger  \(map ship \[request=@uv sent=@da\]\)/)
-  assert.doesNotMatch(stateSur, /state-5|inflight|ledger/)
-  assert.doesNotMatch(backend, /state-5/)
+  // state-5 (pull request labels) is the four fields of state-4 with
+  // labelled pull requests: no state version carries the ledger, and no
+  // later version exists to carry it
+  assert.doesNotMatch(stateSur, /inflight|ledger/)
+  assert.match(stateSur, /\+\$  state-5\n  \$:  %5\n      repositories=\(map @t repository\)\n      peers=\(set @p\)\n      github-token=\(unit @t\)\n      peer-prepare-queue=\(map @uv peer-prepare-entry\)\n  ==\n/)
+  assert.doesNotMatch(gitStateSource, /state-6/)
+  assert.doesNotMatch(ciStateSur, /inflight|ledger|discover/, "%urgit-ci's state carries no catalog ledger")
   // both senders decide through the same gate before a poke goes out
   assert.match(discoverGroup, /=\/  decision  \(plan:git-catalog peer-inflight active-for i\.targets now\.bowl\)/)
-  assert.match(discoverGroup, /\?:  \?=\(%hold -\.decision\)\n        =\.  peer-discoveries\n          \(~\(put by peer-discoveries\) request \(held:git-catalog i\.targets group since\.decision\)\)\n        \$\(targets t\.targets, requests \[request requests\]\)/)
+  assert.match(gaps(discoverGroup), /\?:  \?=\(%hold -\.decision\)  =\.  peer-discoveries  %\+  ~\(put by peer-discoveries\)  request  \(held:git-catalog i\.targets group since\.decision\)  \$\(targets t\.targets, requests \[request requests\]\)/)
   assert.match(discoverGroup, /\(waiting:git-catalog i\.targets group\)/)
   assert.match(discoverGroup, /=\.  peer-inflight  \(sent:git-catalog peer-inflight i\.targets request now\.bowl\)/)
   assert.match(discoverOne, /=\/  decision  \(plan:git-catalog peer-inflight ~ u\.source now\.bowl\)/)
@@ -224,15 +223,15 @@ test('one catalog request rides to a ship at a time: a ship still unacked is rec
   assert.match(discoveriesJson, /\['heldSince' \?~\(held-since\.discovery ~ s\+\(iso:git-catalog u\.held-since\.discovery\)\)\]/)
   assert.match(catalogVector, /\('2026-09-03T00:04:30Z' \(iso:git-catalog ~2026\.9\.3\.\.0\.4\.30\)\)/)
   // the ack on the request's own wire settles the ledger; a nack settles the discovery too
-  assert.match(onAgent, /\?:  \?=\(\[%peer %catalog-request @ ~\] wire\)\n    \?\.  \?=\(%poke-ack -\.sign\)  `this/)
-  assert.match(onAgent, /=\.  peer-inflight  \(settled:git-catalog peer-inflight u\.request\)\n    \?~  p\.sign  `this/)
+  assert.match(gaps(onAgent), /\?:  \?=\(\[%peer %catalog-request @ ~\] wire\)  \?\.  \?=\(%poke-ack -\.sign\)  `this/)
+  assert.match(gaps(onAgent), /=\.  peer-inflight  \(settled:git-catalog peer-inflight u\.request\)  \?~  p\.sign  `this/)
   assert.match(onAgent, /\(~\(put by peer-discoveries\) u\.request \(nacked:git-catalog u\.found\)\)/)
   assert.match(catalogLib, /'peer does not run urgit', status %no-urgit\)/)
   // the timer still settles the silent and the unreachable, and leaves the ledger alone
   assert.match(discoveryTimeout, /\(~\(put by peer-discoveries\) u\.request \(timed-out:git-catalog u\.found\)\)/)
   assert.doesNotMatch(discoveryTimeout, /peer-inflight/)
   assert.match(catalogLib, /'peer discovery timed out', status %unreachable\)/)
-  assert.doesNotMatch(backend, /%cork/)
+  assert.doesNotMatch(allSource, /%cork/)
   // the word reaches the UI beside the flags it already sent
   assert.match(discoveriesJson, /\['status' s\+\(status-text:git-catalog status\.discovery\)\]/)
   assert.match(catalogLib, /\+\$  status  \?\(%answered %no-urgit %unreachable %pending %waiting\)/)
@@ -264,8 +263,8 @@ test('an entry under a group is badged only when that group is not what let this
 test('the agent tags a catalog entry only when the group policy alone granted the read', () => {
   assert.match(catalogRequest, /\?\.  \(repository-readable repo src\.bowl\)  ~/)
   assert.match(catalogRequest, /\(can-read:git-access public-read\.repo owner\.repo readers\.repo writers\.repo %none src\.bowl\)/)
-  assert.match(catalogRequest, /\?:  explicit  ~\n      \?~  group-policy\.repo  ~\n      `group\.u\.group-policy\.repo/)
-  assert.match(catalogRequest, /\(repository-writable repo src\.bowl\) via\]/)
+  assert.match(gaps(catalogRequest), /\?:  explicit  ~  \?~  group-policy\.repo  ~  `group\.u\.group-policy\.repo/)
+  assert.match(gaps(catalogRequest), /\(repository-writable repo src\.bowl\)  via  ==/)
   assert.match(catalogRequest, /\(pack:git-catalog request\.msg answer\)/)
   assert.doesNotMatch(catalogRequest, /group-seat|\.\^/)
 })
@@ -284,12 +283,13 @@ test('the fan-out reads seats from this ship\'s Groups, skips this ship, stops a
   assert.match(discoverGroup, /\['capped' b\+capped\]/)
   assert.match(discoverGroup, /\['members' n\+\(decimal \(lent others\)\)\]/)
   // the group is read on exactly the terms access reads it
-  assert.match(backend, /\+\+  group-members\n  \|=  group=\[host=@p name=@tas\]\n  \^-  \(unit \(set ship\)\)\n  \?~  \(group-seat `\[group %none ~\] our\.bowl\)  ~/)
+  assert.match(gaps(arm(backend, 'on-poke/group-members')), /\+\+  group-members  \|=  group=\[host=@p name=@tas\]  \^-  \(unit \(set ship\)\)  \?~  \(group-seat `\[group %none ~\] our\.bowl\)  ~/)
   // discoveries stay transient
   assert.match(backend, /^=\/  peer-discoveries  \*\(map @uv peer-discovery\)$/m)
-  assert.match(backend, /peer-discoveries ~, peer-inflight ~, peer-browses ~/)
-  assert.doesNotMatch(backend, /state-5/)
-  assert.doesNotMatch(readFileSync(new URL('../../desk/sur/git.hoon', import.meta.url), 'utf8'), /state-5|discover/)
+  assert.match(gaps(backend), /(?:^|  )peer-discoveries  ~  peer-inflight  ~  peer-browses  ~(?=  |$)/)
+  assert.doesNotMatch(gitStateSource, /state-6/)
+  assert.doesNotMatch(ciStateSur, /inflight|ledger|discover/, "%urgit-ci's state carries no discovery")
+  assert.doesNotMatch(readFileSync(new URL('../../desk/sur/git.hoon', import.meta.url), 'utf8'), /state-6|discover/)
   assert.match(discoveriesJson, /\['via' \(group-flag-json via\.repo\)\]/)
   assert.match(discoveriesJson, /\['group' \(group-flag-json group\.discovery\)\]/)
 })
@@ -301,8 +301,8 @@ test('catalog entries carry via on the wire under a new tag while the old tag ke
   assert.match(mark, /noun/)
   assert.match(catalogLib, /\+\+  pack\n  \|=  \[request=@uv answer=\(list catalog-repository:git-peer\)\]/)
   assert.match(catalogLib, /\?\.  \(levy answer \|=\(repo=catalog-repository:git-peer \?=\(~ via\.repo\)\)\)\n    \[%catalog-via request answer\]\n  \[%catalog request \(turn answer legacy\)\]/)
-  assert.match(catalogLib, /%catalog      `\[request\.catalog\.packet \(turn repositories\.catalog\.packet from-legacy\)\]/)
-  assert.match(backend, /    %catalog\n    \(peer-catalog-legacy catalog\.packet\)\n  ::\n      %catalog-via\n    \(peer-catalog catalog\.packet\)/)
+  assert.match(gaps(catalogLib), /%catalog  `\[request\.catalog\.packet \(turn repositories\.catalog\.packet from-legacy\)\]/)
+  assert.match(gaps(arm(backend, 'on-poke/handle-peer')), /%catalog  \(peer-catalog-legacy catalog\.packet\)  %catalog-via  \(peer-catalog catalog\.packet\)/)
   // the vector round-trips both shapes through the mark the peers exchange
   assert.match(catalogVector, /\(noun:grab:git-peer-mark \(cue \(jam packet\)\)\)/)
   assert.match(catalogVector, /\?>  \?=\(%catalog -\.old\)/)
