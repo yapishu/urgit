@@ -85,7 +85,7 @@
   ==
 +$  browse-view  ?(%stamp %overview %issue %pull %commit %file)
 ::
-+$  forge-kind  ?(%issue %pull)
++$  forge-kind  ?(%issue %pull %candidate %policy)
 ::
 +$  forge-comment
   $:  request=@uv
@@ -150,6 +150,22 @@
           message=@t
           result=(unit json)
       ==
+      ::  a writer on another ship approves an untrusted CI candidate of
+      ::  the owner's repository (P3 D9): the owner admits the requester
+      ::  through the same predicate ci-can-write reads, and answers with a
+      ::  %forge-result of kind %candidate (number 0)
+      [%ci-approve request=@uv repository=@t candidate=@uv]
+      ::  a delegate on another ship requests a CI policy action on the
+      ::  owner's repository (P4, rider 02): the body is the operator
+      ::  surface's JSON; the owner's %urgit-ci parses it with the
+      ::  requester as the actor and judges it by the role bindings, and
+      ::  the answer is a %forge-result of kind %policy (number 0)
+      [%ci-request request=@uv repository=@t body=@t]
+      ::  a writer on another ship replaces a pull request's labels on the
+      ::  owner's repository: the owner decides with the sender as the
+      ::  requester, as its own labels route does, and answers with a
+      ::  %forge-result of kind %pull
+      [%forge-labels request=@uv repository=@t number=@ud labels=(list @t)]
       [%offer offer=offer]
       [%offer-branches offer-branches=offer-branches]
       [%release transfer=@uv]

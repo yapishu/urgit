@@ -7,6 +7,17 @@
 ++  repository-json-up-to
   |=  [name=@t repo=repository:git history-limit=@ud]
   ^-  json
+  ::  refs/ci/* are %urgit-ci's scratch refs (a candidate's objects kept
+  ::  reachable for the runner's clone); they are not part of the
+  ::  repository's shape on either route: the authenticated
+  ::  /apps/urgit/api/repository/<name> comes through here directly and
+  ::  the public one through public-repository-json-up-to
+  ::
+  =.  refs.repo
+    %-  malt
+    %+  skip  ~(tap by refs.repo)
+    |=  [ref=@t oid:git]
+    =('refs/ci/' (end [3 8] ref))
   |^
     =/  writers-json=(list json)
       (turn ~(tap in writers.repo) |=(writer=@p s+(scot %p writer)))
@@ -109,6 +120,7 @@
         ['head' s+(oid-text:git-codec head.pull)]
         ['base' s+(oid-text:git-codec base.pull)]
         ['commentCount' n+(decimal (lent comments.pull))]
+        ['labels' (pull-labels-json labels.pull)]
     ==
   ++  github-item-json
     |=  item=forge-item:git
@@ -669,6 +681,16 @@
   =.  fields  (~(put by fields) 'sourceRef' s+source-ref.pull)
   =.  fields  (~(put by fields) 'targetRef' s+target-ref.pull)
   =.  fields  (~(put by fields) 'comments' [%a (turn comments.pull review-comment-json)])
+  =.  fields  (~(put by fields) 'labels' (pull-labels-json labels.pull))
   `[%o fields]
+::
+::  a pull request's labels in name order (aor), as the CI payload lists
+::  them
+::
+++  pull-labels-json
+  |=  labels=(set @t)
+  ^-  json
+  =/  names=(list @t)  (sort ~(tap in labels) aor)
+  [%a (turn names |=(label=@t s+label))]
 ::
 --

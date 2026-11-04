@@ -108,6 +108,24 @@
       comments=(list review-comment)
   ==
 ::
+::  the pull request shape installed ships stored before labels (state-4)
+::
++$  native-pull-4
+  $:  number=@ud
+      source-ship=ship
+      source-repository=@t
+      source-ref=@t
+      target-ref=@t
+      title=@t
+      state=?(%open %merged %closed)
+      head=oid
+      base=oid
+      comments=(list review-comment)
+  ==
+::
+::  state-5: a pull request's labels are free text the owner and writers
+::  set, at most 20, each non-empty and at most 64 bytes, as an issue's
+::
 +$  native-pull
   $:  number=@ud
       source-ship=ship
@@ -119,6 +137,7 @@
       head=oid
       base=oid
       comments=(list review-comment)
+      labels=(set @t)
   ==
 ::
 +$  issue-comment
@@ -374,6 +393,38 @@
       req=peer-prepare-request
   ==
 ::
+::  the repository shape installed ships stored before pull request labels
+::
++$  repository-4
+  $:  owner=@p
+      public-read=?
+      description=@t
+      head=@t
+      refs=(map @t oid)
+      protected-refs=(set @t)
+      objects=(map oid object)
+      writers=(set @p)
+      readers=(set @p)
+      write-token-hash=(unit @)
+      lfs-objects=(map @t lfs-object)
+      lfs-uploads=(map @t lfs-upload)
+      lfs-locks=(map @ud lfs-lock)
+      binding=(unit desk-binding)
+      peer-origin=(unit peer-origin)
+      github-origin=(unit github-origin)
+      github-issues=(list forge-item)
+      github-pulls=(list forge-item)
+      native-pulls=(list native-pull-4)
+      native-issues=(list native-issue)
+      releases=(map @t release)
+      webhooks=(map @ud webhook)
+      incoming-hook=(unit incoming-hook)
+      webhook-deliveries=(list webhook-delivery)
+      upstream-updates=(list upstream-update)
+      notification-events=(set notification-event)
+      group-policy=(unit group-policy)
+  ==
+::
 ::  the repository shape installed ships stored before group policies
 ::
 +$  repository-3
@@ -395,7 +446,7 @@
       github-origin=(unit github-origin)
       github-issues=(list forge-item)
       github-pulls=(list forge-item)
-      native-pulls=(list native-pull)
+      native-pulls=(list native-pull-4)
       native-issues=(list native-issue)
       releases=(map @t release)
       webhooks=(map @ud webhook)
@@ -425,8 +476,18 @@
       peer-prepare-queue=(map @uv peer-prepare-entry)
   ==
 ::
+::  the shape installed ships stored before pull request labels
+::
 +$  state-4
   $:  %4
+      repositories=(map @t repository-4)
+      peers=(set @p)
+      github-token=(unit @t)
+      peer-prepare-queue=(map @uv peer-prepare-entry)
+  ==
+::
++$  state-5
+  $:  %5
       repositories=(map @t repository)
       peers=(set @p)
       github-token=(unit @t)
@@ -456,5 +517,11 @@
       [%publish-desk repository=@t message=@t]
       [%add-peer peer=@p]
       [%remove-peer peer=@p]
+      ::  CI-RECOVERY-1, from %urgit-ci only.  write a checkpoint commit
+      ::  whose objects %urgit-ci built, moving the branch only from the
+      ::  expected tip and sending no webhook.  push a checkpoint branch to
+      ::  the repository's own origin, which answers the ticket later
+      [%write-recovery-commit repository=@t ref=@t expected=(unit oid) commit=oid objects=(list object)]
+      [%push-recovery-replica repository=@t ref=@t ticket=@uv]
   ==
 --
