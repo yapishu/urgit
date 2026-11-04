@@ -1,0 +1,111 @@
+name: urbit toolchain
+description: >
+  Install the harness dependencies, then put a pinned urbit runtime, a
+  pinned pill, click, and click-format where the workflow's steps find
+  them.
+
+# Copied from ERPit's .github/actions/urbit-toolchain, the composite
+# action its fixture jobs (replay, erasure, duo) boot their fake ships
+# with — the same jobs urgit-ci runs 8/8 today. The pins stay OUT of this
+# file: .github/workflows/urgit.yml owns them and passes them in, so a
+# pin has exactly one home. Nothing here is urgit-specific except the
+# last line, which prints this desk's kelvin.
+
+inputs:
+  pill-url:
+    description: the pill to boot every fake ship from
+    required: true
+  vere-url:
+    description: the urbit runtime that matches the pill line
+    required: true
+  tools-sha:
+    description: the urbit/tools commit that click and click-format come from
+    required: true
+  cache-key:
+    description: the artifact cache key, bumped whenever a pin above moves
+    required: true
+
+outputs:
+  pill:
+    description: absolute path to the pill on disk
+    value: ${{ steps.place.outputs.pill }}
+
+runs:
+  using: composite
+  steps:
+    # netcat-openbsd for click's `nc -U -w N -W 1`. tmux because the fake
+    # ship boots under tmux (vere wants the pty tmux gives it). rsync for
+    # the desk sync.
+    - name: install the harness dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq tmux netcat-openbsd rsync
+        tmux -V
+        # A netcat without -U or -W fails deep inside click with an
+        # unreadable error. Say so here instead.
+        if ! nc -h 2>&1 | grep -q -- '-W'; then
+          echo "deps: this nc has no -W (recv limit) — conn.c calls would hang or die" >&2
+          nc -h 2>&1 | head -20 >&2
+          exit 1
+        fi
+
+    # The whole cache directory, under the workflow's key, so every job
+    # of a run shares one download.
+    - name: cache the pill and the runtime
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/urbit-ci
+        key: ${{ runner.os }}-${{ inputs.cache-key }}
+
+    - name: fetch the pill and the runtime
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.cache/urbit-ci
+        pill=~/.cache/urbit-ci/"$(basename '${{ inputs.pill-url }}')"
+        vere=~/.cache/urbit-ci/"$(basename '${{ inputs.vere-url }}')"
+        if [ ! -s "$pill" ]; then
+          echo "downloading the pill from ${{ inputs.pill-url }}"
+          curl -fL --retry 3 --retry-delay 5 -o "$pill" '${{ inputs.pill-url }}'
+        else
+          echo "pill restored from cache"
+        fi
+        if [ ! -s "$vere" ]; then
+          echo "downloading vere from ${{ inputs.vere-url }}"
+          curl -fL --retry 3 --retry-delay 5 -o "$vere" '${{ inputs.vere-url }}'
+        else
+          echo "vere restored from cache"
+        fi
+        ls -l ~/.cache/urbit-ci/
+        sha256sum ~/.cache/urbit-ci/* || true
+
+    # click and click-format BOTH: click shells out to click-format, and
+    # both call `urbit eval` for newt encoding, so the runtime has to be
+    # named `urbit` on PATH.
+    - name: put urbit, click, and click-format on PATH
+      id: place
+      shell: bash
+      run: |
+        set -euo pipefail
+        pill=~/.cache/urbit-ci/"$(basename '${{ inputs.pill-url }}')"
+        vere=~/.cache/urbit-ci/"$(basename '${{ inputs.vere-url }}')"
+        mkdir -p "$HOME/urbit-bin"
+        cp "$vere" "$HOME/urbit-bin/urbit"
+        chmod +x "$HOME/urbit-bin/urbit"
+        base="https://raw.githubusercontent.com/urbit/tools/${{ inputs.tools-sha }}/pkg/click"
+        curl -fsSL --retry 3 -o "$HOME/urbit-bin/click"        "$base/click"
+        curl -fsSL --retry 3 -o "$HOME/urbit-bin/click-format" "$base/click-format"
+        chmod +x "$HOME/urbit-bin/click" "$HOME/urbit-bin/click-format"
+        echo "$HOME/urbit-bin" >> "$GITHUB_PATH"
+        echo "pill=$pill" >> "$GITHUB_OUTPUT"
+
+    - name: report the toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        which urbit click click-format
+        urbit --version || true
+        echo "pill: ${{ steps.place.outputs.pill }}"
+        echo "desk pins: $(tr '\n' ' ' < desk/sys.kelvin)"

@@ -1,0 +1,178 @@
+name: urgit
+
+# urgit's own CI: the Go tests of the runner daemon, the frontend tests,
+# and the 23 Hoon vector generators (desk/gen/*-vector.hoon) — the three
+# suites a developer runs from a shell, as three jobs that urgit-ci
+# itself runs on every push (the daemon maps `ubuntu-latest` to its act
+# image). Each job is bounded to 20 minutes.
+#
+# WHAT THIS IS NOT. The live batteries — P0's contracts, P1's scheduler
+# and daemon, P2's trust and storage, P3's operator surface, and every
+# mutant phase — are .scratch/ci-p3/cold.sh, run on two fresh fake ships
+# with a real runner daemon and a rootless Docker daemon of their own.
+# They are not this workflow and will not be: a job here runs inside one
+# act container, and two ships plus a nested runner plus rootless Docker
+# inside it is the P4 sandbox's problem, not a workflow's.
+#
+# The hoon-vectors job boots a fresh fake ship INSIDE the job, from a
+# pinned pill, with the composite actions under .github/actions/ (copied
+# from ERPit, whose fixture jobs boot their ships the same way under
+# this CI today), commits this tree's desk/ into it, and runs every
+# generator in the dojo. A generator that ends in a loobean must print
+# %.y; one that dumps values for inspection must build and run without a
+# crash; ci-plan-vector also prints `passed=N of=M`, and the step prints
+# the run's own `vectors: passed=N of=M` at the end. Any failure fails
+# the job, with the vector's name.
+
+on:
+  push:
+
+env:
+  # ---- pins. Every one names why it is pinned. ----
+  #
+  # PILL and VERE: bootstrap.urbit.org, one provenance for both, PINNED
+  # to the v4.6 line rather than a moving `last` — a runtime that moved
+  # under us would change what a green check means. The same pins ERPit's
+  # suite.yml carries; its kelvin is one this desk pins (sys.kelvin),
+  # and the boot action fails loud if it is not.
+  PILL_URL: https://bootstrap.urbit.org/urbit-v4.6.pill
+  VERE_URL: https://bootstrap.urbit.org/vere/live/v4.6/vere-v4.6-linux-x86_64
+  # TOOLS: click + click-format, the conn.c thin clients the boot action
+  # commits and polls through. PINNED TO A COMMIT SHA, never master.
+  TOOLS_SHA: c9c91ce142cfe85edbed320138f21c7213aceaab
+  # Bump this key whenever a pin above changes — it is what makes the
+  # cache follow the pins rather than outlive them.
+  ARTIFACT_CACHE_KEY: urbit-v4.6-pill-vere-tools-c9c91ce-1
+  # SKELETON: build.zig's one dependency import (lib/skeleton.hoon from
+  # urbit/urbit's pkg/base-dev at the commit build.zig pins). Keep this
+  # commit equal to build.zig's `dependencies` entry.
+  SKELETON_URL: https://raw.githubusercontent.com/urbit/urbit/0f94550b941dfe046d9dff4a541330bd084e8cd1/pkg/base-dev/lib/skeleton.hoon
+
+jobs:
+  fe-test:
+    name: npm test (fe/)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # the runner's own Node (the act image carries 24; GitHub's
+      # ubuntu-latest 20.19+ or later), which fe/ asks for; printed so a
+      # red run says which
+      - name: npm ci and npm test
+        run: |
+          set -euo pipefail
+          cd fe
+          node --version
+          npm --version
+          npm ci --no-audit --no-fund
+          npm test
+
+  hoon-vectors:
+    name: every +urgit!*-vector on a fresh fake ship
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: toolchain
+        uses: ./.github/actions/urbit-toolchain
+        with:
+          pill-url: ${{ env.PILL_URL }}
+          vere-url: ${{ env.VERE_URL }}
+          tools-sha: ${{ env.TOOLS_SHA }}
+          cache-key: ${{ env.ARTIFACT_CACHE_KEY }}
+
+      # the pier lives outside the checkout (a pier inside the tree would
+      # put a second copy of desk/ under anything that walks it)
+      - uses: ./.github/actions/boot-fake-ship
+        with:
+          ship: zod
+          pier: ${{ runner.temp }}/fakezod
+          session: fakezod
+          pill: ${{ steps.toolchain.outputs.pill }}
+          desk: urgit
+          source: desk
+          skeleton-url: ${{ env.SKELETON_URL }}
+
+      # Each generator is typed into the dojo behind a marker line, the
+      # pane is read back from that marker once the prompt returns, and
+      # the verdict follows the rule the harness's foreground uses: a
+      # generator whose source ends in a loobean must print %.y; one that
+      # dumps values must build and run (no build failure, no bail). The
+      # `passed=N of=M` a generator prints is echoed with its name.
+      - name: run every vector generator in the dojo
+        run: |
+          set +e -uo pipefail
+          session=fakezod
+          desk=urgit
+          prompt='~zod:dojo>'
+          pane() { tmux capture-pane -t "$session" -p -J -S -3000 | sed 's/[[:space:]]*$//'; }
+          idle() { pane | awk 'NF { l = $0 } END { print l }' | grep -qE "^$prompt\s*$"; }
+          wait_idle() { local i; for i in $(seq 1 "$1"); do idle && return 0; sleep 1; done; return 1; }
+          # type a line, then wait for its echo before judging the prompt:
+          # send-keys returns before the pane moves, so an idle check right
+          # after it would still see the previous prompt
+          send() {
+            tmux send-keys -t "$session" -l -- "$1"; tmux send-keys -t "$session" Enter
+            local i; for i in $(seq 1 30); do pane | grep -qF -- "> $1" && return 0; sleep 1; done
+            echo "dojo: no echo of '$1' within 30 s" >&2; return 1
+          }
+          n=0; pass=0; failed=""
+          rows=()
+          for f in desk/gen/*-vector.hoon; do
+            v="$(basename "$f" .hoon)"
+            n=$((n + 1))
+            marker="'vector-$v-$RANDOM'"
+            wait_idle 60 || { echo "$v: the dojo never became idle before it" >&2; failed="$failed $v"; continue; }
+            send "$marker"; wait_idle 60
+            send "+$desk!$v"
+            if ! wait_idle 600; then
+              echo "$v: FAIL (no prompt within 600 s)"
+              failed="$failed $v"; rows+=("| \`$v\` | **FAIL** (no prompt within 600 s) |")
+              continue
+            fi
+            # everything after the marker's own echo: the generator's echo,
+            # its output, the prompt
+            out="$(pane | awk -v m="$marker" '$0 == m { buf = ""; next } { buf = buf $0 "\n" } END { printf "%s", buf }' \
+                   | grep -vE "^$prompt" | grep -v '^> ' \
+                   | grep -vE '^(gall|behn|clay|ames|eyre|dill|kiln|iris|jael|khan|lick|arvo): ')"
+            counts="$(printf '%s\n' "$out" | grep -oE 'passed=[0-9]+ of=[0-9]+' | tail -1)"
+            if grep -qE '^%\.y$|^\?~  failures|^%\.n$|^\?=\(~ failed\)$' "$f"; then
+              verdict="$(printf '%s\n' "$out" | grep -oE '^%\.[yn]$' | tail -1)"
+              if [ "$verdict" = '%.y' ]; then
+                pass=$((pass + 1)); echo "$v: %.y${counts:+ ($counts)}"; rows+=("| \`$v\` | %.y ${counts} |")
+              else
+                echo "$v: FAIL (verdict ${verdict:-none}${counts:+, $counts})"
+                printf '%s\n' "$out" | tail -15 | sed 's/^/    /'
+                failed="$failed $v"; rows+=("| \`$v\` | **FAIL** (verdict ${verdict:-none} ${counts}) |")
+              fi
+            else
+              if printf '%s\n' "$out" | grep -qE 'generator-build-fail|dojo: hoon expression failed|bail:|crud:|nest-fail|mint-vain|-find\.|ford: '; then
+                echo "$v: FAIL (did not build or run)"
+                printf '%s\n' "$out" | tail -15 | sed 's/^/    /'
+                failed="$failed $v"; rows+=("| \`$v\` | **FAIL** (did not build or run) |")
+              else
+                pass=$((pass + 1)); echo "$v: built and ran ($(printf '%s\n' "$out" | grep -v '^\s*$' | tail -1 | cut -c1-70))"; rows+=("| \`$v\` | built and ran |")
+              fi
+            fi
+          done
+          echo "vectors: passed=$pass of=$n"
+          {
+            echo "### hoon vectors"
+            echo
+            echo "| vector | verdict |"
+            echo "| --- | --- |"
+            printf '%s\n' "${rows[@]}"
+            echo
+            echo "**vectors: passed=$pass of=$n**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$failed" ]; then
+            echo "failures:$failed"
+            exit 1
+          fi
+
+      - name: the ship's last lines, and down
+        if: always()
+        run: |
+          tmux capture-pane -t fakezod -p 2>/dev/null | grep -v '^\s*$' | tail -12 || true
+          tmux kill-session -t fakezod 2>/dev/null || true
